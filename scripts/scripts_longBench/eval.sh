@@ -1,8 +1,8 @@
-export CUDA_VISIBLE_DEVICES=$1
+export CUDA_VISIBLE_DEVICES=0
 
-method=$2 # Support PyramidKV, SnapKV, H2O, StreamingLLM, CAM, L2Norm, ThinK
-max_capacity_prompts=$3 # 128,2048 in paper
-attn_implementation=$4 # Support "flash_attention_2", "sdpa", "eager".
+method=H2O # Support PyramidKV, SnapKV, H2O, StreamingLLM, CAM, L2Norm, ThinK
+max_capacity_prompts=64 # 128,2048 in paper
+attn_implementation=flash_attention_2 # Support "flash_attention_2", "sdpa", "eager".
 source_path=$5
 model_path=$6
 merge_method=$7 # Support "pivot"(LOOK-M_PivotMerge).
