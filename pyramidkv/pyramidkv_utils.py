@@ -512,23 +512,14 @@ class CAMKVCluster:
 
             return key_states, value_states
 
-
-from typing import Optional, Tuple, List
-
 class MiniCacheKVCluster:
-    def __init__(self, compression_ratio: float, num_layers: int):
+    def __init__(self, compression_ratio, num_layers):
         self.compression_ratio = compression_ratio
         self.num_layers = num_layers
-        self.half_layers = num_layers // 2
-        self.unit_vectors = {}  # {layer_idx: unit_vectors}
-        self.magnitudes = {}    # {layer_idx: (mag_l, mag_{l-1})}
 
-    def reset(self, compression_ratio: float, num_layers: int):
+    def reset(self, compression_ratio, num_layers):
         self.compression_ratio = compression_ratio
         self.num_layers = num_layers
-        self.half_layers = num_layers // 2
-        self.unit_vectors = {}  # {layer_idx: unit_vectors}
-        self.magnitudes = {}    # {layer_idx: (mag_l, mag_{l-1})}
 
     def _calculate_similarity(self, kv_l, kv_lm1):
         """Calculates cosine similarity between two KV tensors."""
@@ -539,160 +530,72 @@ class MiniCacheKVCluster:
         similarity = torch.einsum("bhsd,bhsd->bhs", kv_l_norm, kv_lm1_norm)  # Cosine similarity
         return similarity
 
-    def _compress_kv(self, key_states, value_states, layer_idx):
-        print('in comrepss')
-        """Compresses KV pairs based on similarity."""
-        # 1. Skip first half and last layer
-        if layer_idx < self.half_layers or layer_idx == self.num_layers - 1:
-            return key_states, value_states, False  # No compression
-
-        # 2. Process only odd layers
-        if layer_idx % 2 == 0:  # Even layer (0-indexed)
-            return None, None, True  # Skip
+    def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups, layer_idx, previous_key_states, previous_value_states):
         
-        # 3. Calculate similarity with the previous layer
-        prev_layer_idx = layer_idx - 1
-        key_similarity = self._calculate_similarity(key_states, self.prev_k)
-        value_similarity = self._calculate_similarity(value_states, self.prev_v)
-        similarity = (key_similarity + value_similarity) / 2 #average
-
-        # 4. Select top-n similar pairs
-        bsz, num_heads, seq_len, head_dim = key_states.shape
-        N = seq_len * num_heads
-        n = int(N * (4 * self.compression_ratio - 2) / (3 - self.compression_ratio))  # Solve for n
+        # check if prefix phase
+        assert key_states.shape[-2] == query_states.shape[-2]
+        bsz, num_heads, q_len, head_dim = query_states.shape
         
-        _, top_n_indices = torch.topk(similarity.view(bsz, -1), n, dim=-1)  # (bsz, n)
+        print(f"miniCache compression_ratio {self.compression_ratio}")
+
+        if layer_idx <= self.num_layers//2 or layer_idx == self.num_layers - 1:
+            return key_states, value_states, None, None, None, None, None, previous_key_states, previous_value_states
         
-        # 4. for these pair, denote as x_l and x_{l-1}, we first obtain e_l=x_l/|x_l| and e_{l+1}=x_{l-1}/|x_{l-1}|, we get their mean unit vector \bar{e}=(e_l+e_{l-1})/2. Here we keep \bar{e},|x_l| and |x_{l-1}|. So when we need x_l, we approximate using |x_l| \bar{e}, same for l-1. 
-        # 5. For unselected pair, we keep their KV cache (retention)
-        # 6. we update the whole KV cache using above rules
-        
-        # Expand indices for gathering
-        top_n_indices_expanded = top_n_indices.unsqueeze(-1).unsqueeze(-1).expand(bsz, n, seq_len, head_dim) # (bsz, n, seq_len, head_dim)
-
-        # Gather selected pairs
-        selected_k_l = torch.gather(key_states, 1, top_n_indices_expanded) # (bsz, n, seq_len, head_dim)
-        selected_v_l = torch.gather(value_states, 1, top_n_indices_expanded)
-        selected_k_lm1 = torch.gather(self.prev_k, 1, top_n_indices_expanded)
-        selected_v_lm1 = torch.gather(self.prev_v, 1, top_n_indices_expanded)
-
-        # Calculate unit vectors and magnitudes
-        mag_k_l = torch.norm(selected_k_l, p=2, dim=-1)
-        mag_v_l = torch.norm(selected_v_l, p=2, dim=-1)
-        mag_k_lm1 = torch.norm(selected_k_lm1, p=2, dim=-1)
-        mag_v_lm1 = torch.norm(selected_v_lm1, p=2, dim=-1)
-
-        e_k_l = selected_k_l / mag_k_l.unsqueeze(-1)
-        e_v_l = selected_v_l / mag_v_l.unsqueeze(-1)
-        e_k_lm1 = selected_k_lm1 / mag_k_lm1.unsqueeze(-1)
-        e_v_lm1 = selected_v_lm1 / mag_v_lm1.unsqueeze(-1)
-
-        unit_k = (e_k_l + e_k_lm1) / 2
-        unit_v = (e_v_l + e_v_lm1) / 2
-
-        # Store unit vectors and magnitudes
-        self.unit_vectors[layer_idx] = (unit_k, unit_v)
-        self.magnitudes[prev_layer_idx] = (mag_k_lm1, mag_v_lm1)
-        self.magnitudes[layer_idx] = (mag_k_l, mag_v_l)
-        
-        # Retain unselected pairs
-        mask = torch.ones(key_states.shape[1], dtype=torch.bool)
-        mask[top_n_indices[0, :]] = False
-        
-        remain_indices = torch.nonzero(mask).unsqueeze(-1).unsqueeze(-1).expand(bsz, -1, seq_len, head_dim)
-        
-        k_l_remain = torch.gather(key_states, 1, remain_indices)
-        v_l_remain = torch.gather(value_states, 1, remain_indices)
-        k_lm1_remain = torch.gather(self.prev_k, 1, remain_indices)
-        v_lm1_remain = torch.gather(self.prev_v, 1, remain_indices)
-
-        key_states_compressed = torch.cat([k_l_remain, k_lm1_remain], dim=1)
-        value_states_compressed = torch.cat([v_l_remain, v_lm1_remain], dim=1)
-        
-        
-        return key_states_compressed, value_states_compressed, False
-
-    def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups, layer_idx):
-        """Updates the KV cache, compressing if necessary."""
-        print('in update')
-        key_states_compressed, value_states_compressed, skip = self._compress_kv(key_states, value_states, layer_idx)
-        self.prev_k = key_states
-        self.prev_v = value_states
-        if skip:
-            return key_states, value_states, skip
-        
-        return key_states_compressed, value_states_compressed, skip
-
-    def restore_kv(self, key_states, value_states, layer_idx):
-        """Restores the KV pairs from compressed representation."""
-        if layer_idx < self.half_layers or layer_idx == self.num_layers - 1:
-            return key_states, value_states  # No restoration needed
-
-        bsz, num_heads, seq_len, head_dim = key_states.shape
-        
-        if layer_idx % 2 == 1:
-          # Odd layer, restore from l-1 using stored unit vectors and magnitudes
-          prev_layer_idx = layer_idx - 1
-
-          if prev_layer_idx not in self.magnitudes:
-              return key_states, value_states # Nothing to restore
-
-          unit_k, unit_v = self.unit_vectors[layer_idx]
-          mag_k_lm1, mag_v_lm1 = self.magnitudes[prev_layer_idx]
-          
-          #select from prev cache
-          mask = torch.ones(self.prev_k.shape[1], dtype=torch.bool)
-          n = unit_k.shape[1]
-          N = self.prev_k.shape[1]
-          
-          _, top_n_indices = torch.topk(torch.norm(self.prev_k, p=2, dim=-1).view(bsz, -1), n, dim=-1)  # (bsz, n)
-          mask[top_n_indices[0, :]] = False
-          
-          remain_indices = torch.nonzero(mask).unsqueeze(-1).unsqueeze(-1).expand(bsz, -1, seq_len, head_dim)
-          
-          k_l_remain = torch.gather(key_states, 1, remain_indices)
-          v_l_remain = torch.gather(value_states, 1, remain_indices)
-
-          restored_k_lm1 = unit_k * mag_k_lm1.unsqueeze(-1)  # (bsz, n, seq_len, head_dim)
-          restored_v_lm1 = unit_v * mag_v_lm1.unsqueeze(-1)
-          
-          # Concatenate restored with retained
-          
-          restored_k = torch.cat([k_l_remain, restored_k_lm1], dim=1)
-          restored_v = torch.cat([v_l_remain, restored_v_lm1], dim=1)
-
         else:
-          # Even layer, restore using own magnitudes
-          if layer_idx not in self.magnitudes:
-              return key_states, value_states  # Nothing to restore
+            bsz, num_heads, seq_len, head_dim = key_states.shape
+            N = seq_len * num_heads
+            n = int(N * (4 * self.compression_ratio - 2) / (3 - self.compression_ratio))
+            if layer_idx % 2 == 0:
+                # concat k and v for similarity calculation
+                kv_similarity = self._calculate_similarity(torch.cat((key_states, value_states), dim=-1), torch.cat((previous_key_states, previous_value_states), dim=-1))
+                _, top_n_indices = torch.topk(kv_similarity, n, dim=-1)
 
-          unit_k, unit_v = self.unit_vectors[layer_idx + 1]
-          mag_k_l, mag_v_l = self.magnitudes[layer_idx]
-          
-          #select from prev cache
-          mask = torch.ones(key_states.shape[1], dtype=torch.bool)
-          n = unit_k.shape[1]
-          N = key_states.shape[1]
-          
-          _, top_n_indices = torch.topk(torch.norm(key_states, p=2, dim=-1).view(bsz, -1), n, dim=-1)  # (bsz, n)
-          mask[top_n_indices[0, :]] = False
-          
-          remain_indices = torch.nonzero(mask).unsqueeze(-1).unsqueeze(-1).expand(bsz, -1, seq_len, head_dim)
-          
-          k_lm1_remain = torch.gather(self.prev_k, 1, remain_indices)
-          v_lm1_remain = torch.gather(self.prev_v, 1, remain_indices)
+                # 4. for these pair, denote as x_l and x_{l-1}, we first obtain e_l=x_l/|x_l| and e_{l+1}=x_{l-1}/|x_{l-1}|, we get their mean unit vector \bar{e}=(e_l+e_{l-1})/2. Here we keep \bar{e},|x_l| and |x_{l-1}|. So when we need x_l, we approximate using |x_l| \bar{e}, same for l-1. 
+                # 5. For unselected pair, we keep their KV cache (retention)
 
-          restored_k_l = unit_k * mag_k_l.unsqueeze(-1)
-          restored_v_l = unit_v * mag_v_l.unsqueeze(-1)
+                top_n_indices_expanded = top_n_indices.unsqueeze(-1).unsqueeze(-1).expand(bsz, n, seq_len, head_dim)
+                
+                selected_k_l = torch.gather(key_states, 1, top_n_indices_expanded) # (bsz, n, seq_len, head_dim)
+                selected_v_l = torch.gather(value_states, 1, top_n_indices_expanded)
+                selected_k_lm1 = torch.gather(self.prev_k, 1, top_n_indices_expanded)
+                selected_v_lm1 = torch.gather(self.prev_v, 1, top_n_indices_expanded)
 
-          # Concatenate restored with retained (empty in this case)
-          restored_k = torch.cat([k_lm1_remain, restored_k_l], dim=1)
-          restored_v = torch.cat([v_lm1_remain, restored_v_l], dim=1)
+                mag_k = torch.norm(selected_k_l, dim=-1)
+                mag_km1 = torch.norm(selected_k_lm1, dim=-1)
+                mag_v = torch.norm(selected_v_l, dim=-1)
+                mag_vm1 = torch.norm(selected_v_lm1, dim=-1)
 
-        return restored_k, restored_v
+                mag_k_cat = torch.cat((mag_k, mag_km1), dim=-1)
+                mag_v_cat = torch.cat((mag_v, mag_vm1), dim=-1)
 
-# Example initialization in LlamaAttention
-# self.kv_cluster = MiniCacheKVCluster(compression_ratio=0.5, num_layers=self.num_hidden_layers) 
+                e_k_l = selected_k_l / mag_k.unsqueeze(-1)
+                e_v_l = selected_v_l / mag_v.unsqueeze(-1)
+                e_k_lm1 = selected_k_lm1 / mag_km1.unsqueeze(-1)
+                e_v_lm1 = selected_v_lm1 / mag_vm1.unsqueeze(-1)
+
+                unit_k = (e_k_l + e_k_lm1) / 2
+                unit_v = (e_v_l + e_v_lm1) / 2
+
+                # get a bool mask to select selected indices, so we can use restored_k[mask==False] = retained_k to replace with the unselected kv
+                mask = torch.ones(N, dtype=bool).to(key_states.device)
+                mask[top_n_indices] = False
+                
+                
+
+                unselected_k = key_states[:, mask, :, :]
+                unselected_v = value_states[:, mask, :, :]
+                unselected_km1 = previous_key_states[:, mask, :, :]
+                unselected_vm1 = previous_value_states[:, mask, :, :]
+
+                return unselected_k, unselected_v, unit_k, unit_v, mag_k_cat, mag_v_cat, mask, unselected_km1, unselected_vm1
+            else:
+                return None, None, None, None, None, None, None, None, None,
+
+
+                
+
+
+
 
 class H2OKVCluster():
     def __init__(self, window_size = 64, max_capacity_prompt = 256 + 64, kernel_size = 5, pooling = 'avgpool', merge = None):

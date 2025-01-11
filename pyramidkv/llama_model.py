@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple, Union
 import torch.nn.functional as F
 import warnings
 from transformers.cache_utils import Cache, DynamicCache
+from pyramidkv.cache_utils_minicache import MiniCache
 from transformers.models.llama.modeling_llama import (
     apply_rotary_pos_emb,
     repeat_kv,
@@ -459,17 +460,17 @@ def llama_attn_forward_MiniCache(
     hidden_states: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
-    past_key_value: Optional["Cache"] = None,  # Modified to use "Cache"
+    past_key_value: Optional[MiniCache] = None,
     output_attentions: bool = False,
     use_cache: bool = False,
     cache_position: Optional[torch.LongTensor] = None,
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
     bsz, q_len, _ = hidden_states.size()
 
-    # Initialize MiniCacheKVCluster if it doesn't exist
-    init_MiniCacheKV(self, num_hidden_layers=self.config.num_hidden_layers)
-
+    # Initialize MiniCacheKVCluster and MiniCache if they don't exist
+    init_MiniCacheKV(self, num_hidden_layers=self.config.num_hidden_layers, past_key_value=past_key_value)
     if self.config.pretraining_tp > 1:
         key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
         query_slices = self.q_proj.weight.split(
@@ -497,6 +498,8 @@ def llama_attn_forward_MiniCache(
     value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
     kv_seq_len = key_states.shape[-2]
+    # if past_key_value is not None:
+    #     kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
     if past_key_value is not None:
         if self.layer_idx is None:
             raise ValueError(
@@ -504,51 +507,63 @@ def llama_attn_forward_MiniCache(
                 "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
                 "with a layer index."
             )
-        kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-
-    cos, sin = self.rotary_emb(value_states, position_ids)
-    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-    
-    if past_key_value is not None:
-        cache_kwargs = {"sin": sin, "cos": cos}  # Removed cache_position as it's not used here
-        
-        # Restore KV cache before updating
-        key_states, value_states = self.kv_cluster.restore_kv(key_states, value_states, self.layer_idx)
-        
-        
-        if key_states.shape[-2] == kv_seq_len:
-            key_states_compress, value_states_compress, skip = self.kv_cluster.update_kv(key_states, query_states, value_states, attention_mask, self.num_key_value_groups, self.layer_idx)
-            
-            if not skip:
-                past_key_value.update(key_states_compress, value_states_compress, self.layer_idx, cache_kwargs)
+        if hasattr(self, "kv_seq_len"): 
+            if self.kv_seq_len != 0:
+                kv_seq_len += self.kv_seq_len
             else:
-                past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+                kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
         else:
-            past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-            
+            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
 
+    if position_embeddings is None:
+        logger.warning_once(
+            "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+            "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+            "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
+            "removed and `position_embeddings` will be mandatory."
+        )
+        cos, sin = self.rotary_emb(value_states, position_ids)
+    else:
+        cos, sin = position_embeddings
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
 
+    if past_key_value is not None:
+        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+
+        if key_states.shape[-2] == kv_seq_len:
+            self.kv_seq_len = kv_seq_len
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+            if self.layer_idx == 0:
+                previous_key_states, previous_value_states = None, None
+            else:
+                previous_key_states, previous_value_states = past_key_value.key_states[self.layer_idx - 1], past_key_value.value_states[self.layer_idx - 1]
+   
+            retained_key_states, retained_value_states, unit_key_states, unit_value_states, key_magnitude, value_magnitude, mask, previous_retained_key_states, previous_retained_value_states = self.kv_cluster.update_kv(key_states, query_states, value_states, attention_mask, self.num_key_value_groups, self.layer_idx, previous_key_states, previous_value_states)
+
+            past_key_value.update_miniCache(retained_key_states, retained_value_states, unit_key_states, unit_value_states, key_magnitude, value_magnitude, mask, previous_retained_key_states, previous_retained_value_states, self.layer_idx, self.config.num_hidden_layers)
+        else:
+            self.kv_seq_len += q_len
+            key_states, value_states = past_key_value.update_miniCache_decode(key_states, value_states, self.layer_idx, self.config.num_hidden_layers, cache_kwargs)
+        past_key_value._seen_tokens=self.kv_seq_len
+
+
     attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
-    if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
-        raise ValueError(
-            f"`attn_weights` should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
-            f" {attn_weights.size()}"
-        )
-
-    if attention_mask is not None:
-        if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-            raise ValueError(
-                f"`attention_mask` should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-            )
-        attn_weights = attn_weights + attention_mask
+    if attention_mask is not None:  # no matter the length, we just slice it
+        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+        attn_weights = attn_weights + causal_mask
 
     # upcast attention to fp32
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
     attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
     attn_output = torch.matmul(attn_weights, value_states)
+
+
+
 
     if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
         raise ValueError(
@@ -557,6 +572,7 @@ def llama_attn_forward_MiniCache(
         )
 
     attn_output = attn_output.transpose(1, 2).contiguous()
+
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
     if self.config.pretraining_tp > 1:
@@ -570,6 +586,7 @@ def llama_attn_forward_MiniCache(
         attn_weights = None
 
     return attn_output, attn_weights, past_key_value
+
 
 def llama_attn_forward_L2Norm(
     self,
