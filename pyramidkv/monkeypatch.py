@@ -2,7 +2,7 @@ from importlib.metadata import version
 import transformers
 
 from pyramidkv.llama_model import llama_flash_attn2_forward_HeadKV, llama_flash_attn2_forward_AdaKV, llama_flash_attn2_forward_PyramidKV,llama_flash_attn2_forward_CAM,llama_flash_attn2_forward_H2O,llama_flash_attn2_forward_SnapKV,llama_flash_attn2_forward_StreamingLLM, llama_flash_attn2_forward_L2Norm
-from pyramidkv.llama_model import llama_attn_forward_PyramidKV,llama_attn_forward_CAM,llama_attn_forward_H2O,llama_attn_forward_SnapKV,llama_attn_forward_StreamingLLM, llama_attn_forward_L2Norm
+from pyramidkv.llama_model import llama_attn_forward_PyramidKV,llama_attn_forward_CAM,llama_attn_forward_H2O,llama_attn_forward_SnapKV,llama_attn_forward_StreamingLLM, llama_attn_forward_L2Norm, llama_attn_forward_MiniCache
 from pyramidkv.llama_model import llama_sdpa_attn_forward_PyramidKV,llama_sdpa_attn_forward_CAM,llama_sdpa_attn_forward_H2O,llama_sdpa_attn_forward_SnapKV,llama_sdpa_attn_forward_StreamingLLM, llama_sdpa_attn_forward_L2Norm
 from pyramidkv.llama_model import adaptive_LlamaModel_forward
 from pyramidkv.llama_model_think import llama_attn_forward_SnapKV_ThinK, think_model_forward
@@ -81,7 +81,12 @@ def replace_llama(method, model_name=None):
         print("Using Think!")
         transformers.models.llama.modeling_llama.LlamaModel.forward = think_model_forward
         transformers.models.llama.modeling_llama.LlamaAttention.forward = llama_attn_forward_SnapKV_ThinK
-
+    
+    elif method == "minicache":
+        print("Using MiniCache!")
+        transformers.models.llama.modeling_llama.LlamaAttention.forward = llama_attn_forward_MiniCache
+        # transformers.models.llama.modeling_llama.LlamaFlashAttention2.forward = llama_flash_attn2_forward_MiniCache
+        # transformers.models.llama.modeling_llama.LlamaSdpaAttention.forward = llama_sdpa_attn_forward_MiniCache
 
     if method not in ["fullkv"]:
         transformers.models.llama.modeling_llama.LlamaForCausalLM.prepare_inputs_for_generation = prepare_inputs_for_generation_llama_new
