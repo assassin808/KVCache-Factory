@@ -513,7 +513,6 @@ class CAMKVCluster:
             return key_states, value_states
 
 
-import torch
 from typing import Optional, Tuple, List
 
 class MiniCacheKVCluster:
@@ -523,8 +522,6 @@ class MiniCacheKVCluster:
         self.half_layers = num_layers // 2
         self.unit_vectors = {}  # {layer_idx: unit_vectors}
         self.magnitudes = {}    # {layer_idx: (mag_l, mag_{l-1})}
-        self.prev_k = None
-        self.prev_v = None
 
     def reset(self, compression_ratio: float, num_layers: int):
         self.compression_ratio = compression_ratio
@@ -532,8 +529,6 @@ class MiniCacheKVCluster:
         self.half_layers = num_layers // 2
         self.unit_vectors = {}  # {layer_idx: unit_vectors}
         self.magnitudes = {}    # {layer_idx: (mag_l, mag_{l-1})}
-        self.prev_k = None
-        self.prev_v = None
 
     def _calculate_similarity(self, kv_l, kv_lm1):
         """Calculates cosine similarity between two KV tensors."""
@@ -545,6 +540,7 @@ class MiniCacheKVCluster:
         return similarity
 
     def _compress_kv(self, key_states, value_states, layer_idx):
+        print('in comrepss')
         """Compresses KV pairs based on similarity."""
         # 1. Skip first half and last layer
         if layer_idx < self.half_layers or layer_idx == self.num_layers - 1:
@@ -553,7 +549,7 @@ class MiniCacheKVCluster:
         # 2. Process only odd layers
         if layer_idx % 2 == 0:  # Even layer (0-indexed)
             return None, None, True  # Skip
-
+        
         # 3. Calculate similarity with the previous layer
         prev_layer_idx = layer_idx - 1
         key_similarity = self._calculate_similarity(key_states, self.prev_k)
@@ -618,19 +614,17 @@ class MiniCacheKVCluster:
 
     def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups, layer_idx):
         """Updates the KV cache, compressing if necessary."""
-        
+        print('in update')
         key_states_compressed, value_states_compressed, skip = self._compress_kv(key_states, value_states, layer_idx)
-        
+        self.prev_k = key_states
+        self.prev_v = value_states
         if skip:
-            self.prev_k = key_states
-            self.prev_v = value_states
             return key_states, value_states, skip
         
         return key_states_compressed, value_states_compressed, skip
 
     def restore_kv(self, key_states, value_states, layer_idx):
         """Restores the KV pairs from compressed representation."""
-
         if layer_idx < self.half_layers or layer_idx == self.num_layers - 1:
             return key_states, value_states  # No restoration needed
 
@@ -1154,7 +1148,7 @@ def init_l2norm(self):
         skip_layers = self.config.skip_layers
     )
 
-def init_MiniCache(self):
+def init_MiniCacheKV(self, num_hidden_layers):
     if not hasattr(self, "kv_cluster"):
         if not hasattr(self.config, 'window_size'):
             self.config.window_size = 32
@@ -1166,13 +1160,11 @@ def init_MiniCache(self):
             self.config.pooling = 'avgpool'
         if not hasattr(self.config, 'merge'):
             self.config.merge = None
+
     
     self.kv_cluster = MiniCacheKVCluster(
-        window_size = self.config.window_size, 
-        max_capacity_prompt = self.config.max_capacity_prompt, 
-        kernel_size = self.config.kernel_size,
-        pooling = self.config.pooling,
-        merge = self.config.merge,
+         compression_ratio=0.5,
+         num_layers = num_hidden_layers,
         )
 
 def init_CAM(self):
