@@ -549,16 +549,14 @@ class MiniCacheKVCluster:
                 # concat k and v for similarity calculation
                 kv_similarity = self._calculate_similarity(torch.cat((key_states, value_states), dim=-1), torch.cat((previous_key_states, previous_value_states), dim=-1))
                 _, top_n_indices = torch.topk(kv_similarity, n, dim=-1)
-
-                # 4. for these pair, denote as x_l and x_{l-1}, we first obtain e_l=x_l/|x_l| and e_{l+1}=x_{l-1}/|x_{l-1}|, we get their mean unit vector \bar{e}=(e_l+e_{l-1})/2. Here we keep \bar{e},|x_l| and |x_{l-1}|. So when we need x_l, we approximate using |x_l| \bar{e}, same for l-1. 
-                # 5. For unselected pair, we keep their KV cache (retention)
-
-                top_n_indices_expanded = top_n_indices.unsqueeze(-1).unsqueeze(-1).expand(bsz, n, seq_len, head_dim)
                 
-                selected_k_l = torch.gather(key_states, 1, top_n_indices_expanded) # (bsz, n, seq_len, head_dim)
-                selected_v_l = torch.gather(value_states, 1, top_n_indices_expanded)
-                selected_k_lm1 = torch.gather(self.prev_k, 1, top_n_indices_expanded)
-                selected_v_lm1 = torch.gather(self.prev_v, 1, top_n_indices_expanded)
+                # Correctly handle expansion
+                top_n_indices_expanded = top_n_indices.unsqueeze(-1).expand(bsz, num_heads, n, head_dim) #expand at dim = -1 will solve the problem
+
+                selected_k_l = torch.gather(key_states, 2, top_n_indices_expanded)
+                selected_v_l = torch.gather(value_states, 2, top_n_indices_expanded)
+                selected_k_lm1 = torch.gather(previous_key_states, 2, top_n_indices_expanded)
+                selected_v_lm1 = torch.gather(previous_value_states, 2, top_n_indices_expanded)
 
                 mag_k = torch.norm(selected_k_l, dim=-1)
                 mag_km1 = torch.norm(selected_k_lm1, dim=-1)
@@ -577,15 +575,14 @@ class MiniCacheKVCluster:
                 unit_v = (e_v_l + e_v_lm1) / 2
 
                 # get a bool mask to select selected indices, so we can use restored_k[mask==False] = retained_k to replace with the unselected kv
-                mask = torch.ones(N, dtype=bool).to(key_states.device)
-                mask[top_n_indices] = False
-                
-                
+                mask = torch.ones(bsz, num_heads, seq_len, dtype=torch.bool, device=key_states.device) # Create a mask with the correct number of dims
+                mask[:, :, top_n_indices] = False  # Now correctly set the selected indices to False.
 
-                unselected_k = key_states[:, mask, :, :]
-                unselected_v = value_states[:, mask, :, :]
-                unselected_km1 = previous_key_states[:, mask, :, :]
-                unselected_vm1 = previous_value_states[:, mask, :, :]
+                # No need to change how you index now that the mask has the right shape
+                unselected_k = key_states[~mask, :].view(bsz, -1, seq_len, head_dim)
+                unselected_v = value_states[~mask, :].view(bsz, -1, seq_len, head_dim)
+                unselected_km1 = previous_key_states[~mask, :].view(bsz, -1, seq_len, head_dim)
+                unselected_vm1 = previous_value_states[~mask, :].view(bsz, -1, seq_len, head_dim)
 
                 return unselected_k, unselected_v, unit_k, unit_v, mag_k_cat, mag_v_cat, mask, unselected_km1, unselected_vm1
             else:
