@@ -4,8 +4,7 @@ import torch.nn.functional as F
 from typing import List, Optional, Tuple, Union
 import torch.nn.functional as F
 import warnings
-from transformers.cache_utils import Cache, DynamicCache
-from pyramidkv.cache_utils_minicache import MiniCache
+from pyramidkv.cache_utils_minicache import Cache, DynamicCache
 from transformers.models.llama.modeling_llama import (
     apply_rotary_pos_emb,
     repeat_kv,
@@ -3038,7 +3037,7 @@ def minicache_model_forward(
         use_cache and not isinstance(past_key_values, Cache) and not self.training
     ):  # kept for BC (non `Cache` `past_key_values` inputs)
         return_legacy_cache = True
-        past_key_values = MiniCache.from_legacy_cache(past_key_values)
+        past_key_values = DynamicCache.from_legacy_cache(past_key_values)
         logger.warning_once(
             "We detected that you are passing `past_key_values` as a tuple and this is deprecated and will be removed in v4.43. "
             "Please use an appropriate `Cache` class (https://huggingface.co/docs/transformers/v4.41.3/en/internal/generation_utils#transformers.Cache)"
