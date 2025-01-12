@@ -228,7 +228,8 @@ class DynamicCache(Cache):
       self.value_magnitude: List[torch.Tensor] = []
 
       self._seen_tokens = 0  # Used in `generate` to keep tally of how many tokens the cache has seen
-      self.mask = []
+      self.mask_k = []
+      self.mask_v = []
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
         """
@@ -295,7 +296,8 @@ class DynamicCache(Cache):
             unit_value_states: torch.Tensor,
             key_magnitude: torch.Tensor,
             value_magnitude: torch.Tensor,
-            mask,
+            mask_k,
+            mask_v,
             previous_key_states: torch.Tensor,
             previous_value_states: torch.Tensor,
             layer_idx: int,   
@@ -309,22 +311,30 @@ class DynamicCache(Cache):
         #     print('prefill:',layer_idx, self.retained_key_cache[layer_idx].shape,key_states.shape,len(self.key_unit_cache))
         # except Exception as e:
         #     print('prefill:',layer_idx, None,len(self.key_unit_cache))
-        if layer_idx < num_layers//2 or layer_idx == num_layers-1 or layer_idx % 2 == 1:
+        if layer_idx < num_layers//2:
             self.key_unit_cache.append(None)
             self.value_unit_cache.append(None)
             self.key_magnitude.append(None)
             self.value_magnitude.append(None)
-            self.mask.append(None)
+            self.mask_k.append(None)
+            self.mask_v.append(None)
             return None
-                           
-        
-        if layer_idx % 2 == 0:
+             
+        if layer_idx % 2 == 1:
             # print('unit prefill:', layer_idx, unit_key_states)
             self.key_unit_cache.append(unit_key_states)
             self.value_unit_cache.append(unit_value_states)
             self.key_magnitude.append(key_magnitude)
             self.value_magnitude.append(value_magnitude)
-            self.mask.append(mask)
+            self.mask_k.append(mask_k)
+            self.mask_v.append(mask_v)
+
+            self.key_unit_cache.append(None)
+            self.value_unit_cache.append(None)
+            self.key_magnitude.append(None)
+            self.value_magnitude.append(None)
+            self.mask_k.append(None)
+            self.mask_v.append(None)
 
             self.retained_key_cache[layer_idx] = key_states
             self.retained_value_cache[layer_idx] = value_states
@@ -352,7 +362,7 @@ class DynamicCache(Cache):
         #     print('decode:',layer_idx, self.retained_key_cache[layer_idx].shape,key_states.shape,len(self.key_unit_cache))
         # except Exception as e:
         #     print('decode:',layer_idx, None, len(self.key_unit_cache))
-        if layer_idx < num_layers//2 or layer_idx == num_layers-1 or layer_idx % 2 == 1:
+        if layer_idx < num_layers//2 or layer_idx % 2 == 1:
             self.retained_key_cache[layer_idx] = torch.cat([self.retained_key_cache[layer_idx], key_states], dim=-2)
             self.retained_value_cache[layer_idx] = torch.cat([self.retained_value_cache[layer_idx], value_states], dim=-2)
 
@@ -375,14 +385,15 @@ class DynamicCache(Cache):
             # print('mask_bf:',sum(sum(sum(~self.mask[layer_idx]))))
             
             # print(new_shape)
-            padding = torch.ones((1, 32, 1), device=self.key_magnitude[layer_idx].device,dtype = self.mask[layer_idx].dtype)
-            self.mask[layer_idx] = torch.cat((self.mask[layer_idx], padding), dim=-1)
+            padding = torch.ones((1, 32, 1), device=self.key_magnitude[layer_idx].device,dtype = self.mask_k[layer_idx].dtype)
+            self.mask_k[layer_idx] = torch.cat((self.mask_k[layer_idx], padding), dim=-1)
+            self.mask_v[layer_idx] = torch.cat((self.mask_v[layer_idx], padding), dim=-1)
             
             # print('mask_after:',sum(sum(sum(~self.mask[layer_idx]))))
             
             
         # restore
-        if layer_idx < num_layers//2 or layer_idx == num_layers-1:
+        if layer_idx < num_layers//2:
             return self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx]
         
         elif layer_idx % 2 == 1:
@@ -393,11 +404,10 @@ class DynamicCache(Cache):
 
             # use magnitude[1] * previous_unit_key_states / mag(previous_unit_key_states) + magnitude[0] * unit_key_states / mag(unit_key_states)
             restored_key_states = previous_key_magnitude[0:1, :, :].unsqueeze(-1) * previous_unit_key_states / torch.norm(previous_unit_key_states, dim=-1, keepdim=True)
-            restored_key_states[self.mask[layer_idx-1]] = self.retained_key_cache[layer_idx].view(-1, 128)
+            restored_key_states[self.mask_k[layer_idx-1]] = self.retained_key_cache[layer_idx].view(-1, 128)
 
             restored_value_states = previous_value_magnitude[0:1, :, :].unsqueeze(-1) * previous_unit_value_states / torch.norm(previous_unit_value_states, dim=-1, keepdim=True)
-            restored_value_states[self.mask[layer_idx-1]] = self.retained_value_cache[layer_idx].view(-1, 128)
-
+            restored_value_states[self.mask_v[layer_idx-1]] = self.retained_value_cache[layer_idx].view(-1, 128)
             return restored_key_states, restored_value_states
         elif layer_idx % 2 == 0:
             
@@ -409,11 +419,10 @@ class DynamicCache(Cache):
 
             restored_key_states = key_magnitude[1:2, :, :].unsqueeze(-1) * unit_key_states / torch.norm(unit_key_states, dim=-1, keepdim=True)
   
-            restored_key_states[self.mask[layer_idx]] = self.retained_key_cache[layer_idx].view(-1, 128)
+            restored_key_states[self.mask_k[layer_idx]] = self.retained_key_cache[layer_idx].view(-1, 128)
 
             restored_value_states = value_magnitude[1:2, :, :].unsqueeze(-1) * unit_value_states / torch.norm(unit_value_states, dim=-1, keepdim=True)
-            restored_value_states[self.mask[layer_idx]] = self.retained_value_cache[layer_idx].view(-1, 128)
-
+            restored_value_states[self.mask_v[layer_idx]] = self.retained_value_cache[layer_idx].view(-1, 128)
             return restored_key_states, restored_value_states
     @classmethod
     def from_legacy_cache(cls, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None) -> "MiniCache":
@@ -428,7 +437,8 @@ class DynamicCache(Cache):
                 cache.value_unit_cache.append(past_key_values[layer_idx][3])
                 cache.key_magnitude.append(past_key_values[layer_idx][4])
                 cache.value_magnitude.append(past_key_values[layer_idx][5])
-                cache.mask.append(past_key_values[layer_idx][6])
+                cache.mask_k.append(past_key_values[layer_idx][6])
+                cache.mask_v.append(past_key_values[layer_idx][7])
 
 
         return cache
@@ -447,7 +457,7 @@ class DynamicCache(Cache):
         backward compatibility."""
         legacy_cache = ()
         for layer_idx in range(len(self)):
-            legacy_cache += ((self.retained_key_cache[layer_idx],  self.retained_value_cache[layer_idx], self.key_unit_cache[layer_idx], self.value_unit_cache[layer_idx], self.key_magnitude[layer_idx], self.value_magnitude[layer_idx], self.mask[layer_idx]),)
+            legacy_cache += ((self.retained_key_cache[layer_idx],  self.retained_value_cache[layer_idx], self.key_unit_cache[layer_idx], self.value_unit_cache[layer_idx], self.key_magnitude[layer_idx], self.value_magnitude[layer_idx], self.mask_k[layer_idx], self.mask_v[layer_idx]),)
         return legacy_cache
 
     def crop(self, max_length: int):

@@ -521,14 +521,6 @@ class MiniCacheKVCluster:
         self.compression_ratio = compression_ratio
         self.num_layers = num_layers
 
-    def _calculate_similarity(self, kv_l, kv_lm1):
-        """Calculates cosine similarity between two KV tensors."""
-        # kv_l: (bsz, num_heads, seq_len, head_dim)
-        # kv_lm1: (bsz, num_heads, seq_len, head_dim)
-        kv_l_norm = torch.nn.functional.normalize(kv_l, p=2, dim=-1)
-        kv_lm1_norm = torch.nn.functional.normalize(kv_lm1, p=2, dim=-1)
-        similarity = torch.einsum("bhsd,bhsd->bhs", kv_l_norm, kv_lm1_norm)  # Cosine similarity
-        return similarity
 
     def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups, layer_idx, previous_key_states, previous_value_states):
         
@@ -538,15 +530,17 @@ class MiniCacheKVCluster:
         
         print(f"miniCache compression_ratio {self.compression_ratio}")
 
-        if layer_idx < self.num_layers//2 or layer_idx == self.num_layers - 1:
-            return key_states, value_states, None, None, None, None, None, previous_key_states, previous_value_states
+        if layer_idx < self.num_layers//2:
+            return key_states, value_states, None, None, None, None, None, None, previous_key_states, previous_value_states
         
 
         else:
             bsz, num_heads, seq_len, head_dim = key_states.shape
             N = seq_len #* num_heads
             n = int(4 * N * (1 - self.compression_ratio))
-            if layer_idx % 2 == 0:
+            # if layer_idx == self.num_layers - 1:
+            #     n = 1
+            if layer_idx % 2 == 1:
                 # 1. Calculate unit vectors (unit_k, unit_v) using ALL key and value states:
 
                 # Calculate magnitudes for all k, v, prev_k, prev_v
@@ -562,38 +556,47 @@ class MiniCacheKVCluster:
                 e_k_lm1 = previous_key_states / mag_km1.unsqueeze(-1)
                 e_v_lm1 = previous_value_states / mag_vm1.unsqueeze(-1)
 
+                k_similarity = torch.einsum("bhsd,bhsd->bhs", e_k_l, e_k_lm1)
+                v_similarity = torch.einsum("bhsd,bhsd->bhs", e_v_l, e_v_lm1)
+                angle_k = torch.acos(k_similarity).unsqueeze(-1)
+                angle_v = torch.acos(v_similarity).unsqueeze(-1)
 
-                angle = torch.einsum("bhsd,bhsd->bhs", e_k_l, e_k_lm1).unsqueeze(-1)
+
+
                 # Calculate unit_k and unit_v using all elements, using SLERP:
-                unit_k = torch.sin(angle/2)/torch.sin(angle) * e_k_l + torch.sin(angle/2)/torch.sin(angle) * e_k_lm1
-                unit_v = torch.sin(angle/2)/torch.sin(angle) * e_v_l + torch.sin(angle/2)/torch.sin(angle) * e_v_lm1
+                unit_k = torch.sin(angle_k*0.6)/torch.sin(angle_k) * e_k_l + torch.sin(angle_k*0.4)/torch.sin(angle_k) * e_k_lm1
+                unit_v = torch.sin(angle_v*0.6)/torch.sin(angle_v) * e_v_l + torch.sin(angle_v*0.4)/torch.sin(angle_v) * e_v_lm1
 
                 # 2. Calculate similarity and determine the top_n_indices (for masking):
-                kv_similarity = self._calculate_similarity(torch.cat((e_k_l, e_v_l), dim=-1), torch.cat((e_k_lm1, e_v_lm1), dim=-1))
-                _, top_n_indices = torch.topk(kv_similarity, n, dim=-1)  # These are indices of most SIMILAR items
+                
+                _, top_n_indices_k = torch.topk(k_similarity, n, dim=-1)  # These are indices of most SIMILAR items
+                
+                _, top_n_indices_v = torch.topk(v_similarity, n, dim=-1)
 
                 # 3. Create the mask based on top_n_indices:
-                mask = torch.ones(bsz, num_heads, seq_len, dtype=torch.bool, device=key_states.device)
-                mask = mask.scatter(2, top_n_indices, 0)  # Set the top_n_indices to False (0)False
+                mask_k = torch.ones(bsz, num_heads, seq_len, dtype=torch.bool, device=key_states.device)
+                mask_v = torch.ones(bsz, num_heads, seq_len, dtype=torch.bool, device=key_states.device)
+                mask_k = mask_k.scatter(2, top_n_indices_k, 0)  # Set the top_n_indices to False (0)False
+                mask_v = mask_v.scatter(2, top_n_indices_v, 0)  # Set the top_n_indices to False (0)False
                 # 4. Group only the UNSELECTED elements:
                 
                 #   - Invert the mask to select the unselected elements.
                 #   - Use masked_select to get a flattened view of the unselected elements.
                 #   - Reshape the flattened view to group the unselected elements together.
                 
-                unselected_k = key_states.masked_select(mask.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
-                unselected_v = value_states.masked_select(mask.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
-                unselected_km1 = previous_key_states.masked_select(mask.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
-                unselected_vm1 = previous_value_states.masked_select(mask.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
+                unselected_k = key_states.masked_select(mask_k.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
+                unselected_v = value_states.masked_select(mask_v.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
+                unselected_km1 = previous_key_states.masked_select(mask_k.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
+                unselected_vm1 = previous_value_states.masked_select(mask_v.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
                 # print('cluster',layer_idx,unselected_k.shape)
 
                 mag_k_cat = torch.cat((mag_k, mag_km1), dim=0)
                 mag_v_cat = torch.cat((mag_v, mag_vm1), dim=0)
 
                 # 5. Return the necessary values:
-                return unselected_k, unselected_v, unit_k, unit_v, mag_k_cat, mag_v_cat, mask, unselected_km1, unselected_vm1
+                return unselected_k, unselected_v, unit_k, unit_v, mag_k_cat, mag_v_cat, mask_k, mask_v,  unselected_km1, unselected_vm1
             else:
-                return None, None, None, None, None, None, None, None, None,
+                return None, None, None, None, None, None, None, None, None, None
 
 
                 
@@ -1070,7 +1073,7 @@ def init_MiniCacheKV(self, num_hidden_layers):
 
     
     self.kv_cluster = MiniCacheKVCluster(
-         compression_ratio=0.8,
+         compression_ratio=0.9,
          num_layers = num_hidden_layers,
         )
 

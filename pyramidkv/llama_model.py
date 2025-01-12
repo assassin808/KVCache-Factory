@@ -541,9 +541,9 @@ def llama_attn_forward_MiniCache(
             else:
                 previous_key_states, previous_value_states = past_key_value.retained_key_cache[self.layer_idx - 1], past_key_value.retained_value_cache[self.layer_idx - 1]
    
-            retained_key_states, retained_value_states, unit_key_states, unit_value_states, key_magnitude, value_magnitude, mask, previous_retained_key_states, previous_retained_value_states = self.kv_cluster.update_kv(key_states, query_states, value_states, attention_mask, self.num_key_value_groups, self.layer_idx, previous_key_states, previous_value_states)
+            retained_key_states, retained_value_states, unit_key_states, unit_value_states, key_magnitude, value_magnitude, mask_k, mask_v, previous_retained_key_states, previous_retained_value_states = self.kv_cluster.update_kv(key_states, query_states, value_states, attention_mask, self.num_key_value_groups, self.layer_idx, previous_key_states, previous_value_states)
 
-            past_key_value.update_miniCache(retained_key_states, retained_value_states, unit_key_states, unit_value_states, key_magnitude, value_magnitude, mask, previous_retained_key_states, previous_retained_value_states, self.layer_idx, self.config.num_hidden_layers)
+            past_key_value.update_miniCache(retained_key_states, retained_value_states, unit_key_states, unit_value_states, key_magnitude, value_magnitude, mask_k, mask_v, previous_retained_key_states, previous_retained_value_states, self.layer_idx, self.config.num_hidden_layers)
         else:
             self.kv_seq_len += q_len
             key_states, value_states = past_key_value.update_miniCache_decode(key_states, value_states, self.layer_idx, self.config.num_hidden_layers, cache_kwargs)
