@@ -253,7 +253,7 @@ class DynamicCache(Cache):
         Support for backwards-compatible `past_key_value` length, e.g. `len(past_key_value)`. This value corresponds
         to the number of layers in the model.
         """
-        return len(self.key_cache)
+        return len(self.retained_key_cache)
     def update(
         self,
         key_states: torch.Tensor,
@@ -305,7 +305,10 @@ class DynamicCache(Cache):
         Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx` and the previous `key_states` and `value_states`.
         """
         # Update the number of seen tokens
-
+        try:
+            print('prefill:',layer_idx, self.retained_key_cache[layer_idx].shape,key_states.shape)
+        except Exception as e:
+            print('prefill:',layer_idx, None)
         if layer_idx <= num_layers//2 or layer_idx == num_layers-1 or layer_idx % 2 == 1:
             self.key_unit_cache.append(None)
             self.value_unit_cache.append(None)
@@ -344,7 +347,10 @@ class DynamicCache(Cache):
 
         # Update the cache
         assert len(self.retained_key_cache) > layer_idx
-
+        try:
+            print('decode:',layer_idx, self.retained_key_cache[layer_idx].shape,key_states.shape)
+        except Exception as e:
+            print('decode:',layer_idx, None)
         if layer_idx <= num_layers//2 or layer_idx == num_layers-1 or layer_idx % 2 == 1:
             self.retained_key_cache[layer_idx] = torch.cat([self.retained_key_cache[layer_idx], key_states], dim=-2)
             self.retained_value_cache[layer_idx] = torch.cat([self.retained_value_cache[layer_idx], value_states], dim=-2)
@@ -406,8 +412,8 @@ class DynamicCache(Cache):
         cache = cls()
         if past_key_values is not None:
             for layer_idx in range(len(past_key_values)):
-                cache.retained_key_cache[layer_idx].append(past_key_values[layer_idx])
-                cache.retained_value_cache[layer_idx].append(past_key_values[layer_idx])
+                cache.retained_key_cache.append(past_key_values[layer_idx][0])
+                cache.retained_value_cache.append(past_key_values[layer_idx][1])
 
         return cache
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
@@ -425,7 +431,7 @@ class DynamicCache(Cache):
         backward compatibility."""
         legacy_cache = ()
         for layer_idx in range(len(self)):
-            legacy_cache += ((self.key_cache_pruned[layer_idx], self.key_cache[layer_idx], self.mask[layer_idx], self.value_cache[layer_idx]),)
+            legacy_cache += ((self.retained_key_cache[layer_idx],  self.retained_value_cache[layer_idx]),)
         return legacy_cache
 
     def crop(self, max_length: int):
