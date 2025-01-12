@@ -362,15 +362,23 @@ class DynamicCache(Cache):
             self.retained_value_cache[layer_idx] = torch.cat([self.retained_value_cache[layer_idx], value_states], dim=-2)
             self.key_unit_cache[layer_idx] = torch.cat([self.key_unit_cache[layer_idx], key_states], dim=-2)
             self.value_unit_cache[layer_idx] = torch.cat([self.value_unit_cache[layer_idx], value_states], dim=-2)
-            # We want to copy the last element in self.key_magnitude[layer_idx] and concat it with self.key_magnitude[layer_idx].
-            new_shape = list(self.key_magnitude[layer_idx].shape)
-            new_shape[0] += 1
-            self.key_magnitude[layer_idx].resize_(new_shape)
-            self.value_magnitude[layer_idx].resize_(new_shape)
+            # We want to copy the last element in self.key_magnitude[layer_idx] and concat it with self.key_magnitude[layer_idx]
 
-            new_shape = list(self.mask[layer_idx].shape)
-            new_shape[0] += 1
-            self.mask[layer_idx].resize_(new_shape)
+
+            # Create a tensor of zeros with the desired shape for padding
+            padding = torch.zeros((2, 32, 1), device=self.key_magnitude[layer_idx].device,dtype = self.key_magnitude[layer_idx].dtype)
+
+            # Concatenate the original tensor and the padding along the last dimension
+            self.key_magnitude[layer_idx] = torch.cat((self.key_magnitude[layer_idx], padding), dim=-1)
+            self.value_magnitude[layer_idx] = torch.cat((self.value_magnitude[layer_idx], padding), dim=-1)
+
+            # print('mask_bf:',sum(sum(sum(~self.mask[layer_idx]))))
+            
+            # print(new_shape)
+            padding = torch.ones((1, 32, 1), device=self.key_magnitude[layer_idx].device,dtype = self.mask[layer_idx].dtype)
+            self.mask[layer_idx] = torch.cat((self.mask[layer_idx], padding), dim=-1)
+            
+            # print('mask_after:',sum(sum(sum(~self.mask[layer_idx]))))
             
             
         # restore
@@ -384,11 +392,11 @@ class DynamicCache(Cache):
             previous_value_magnitude = self.value_magnitude[layer_idx-1]
 
             # use magnitude[1] * previous_unit_key_states + magnitude[0] * unit_key_states
-            restored_key_states = previous_key_magnitude.view(-1, *([1] * (key_states.dim() - 1))) * previous_unit_key_states
-            restored_key_states[self.mask[layer_idx-1] == False] = self.retained_key_states[layer_idx-1]
+            restored_key_states = previous_key_magnitude[0:1, :, :].unsqueeze(-1) * previous_unit_key_states
+            restored_key_states[self.mask[layer_idx-1]] = self.retained_key_cache[layer_idx].view(-1, 128)
 
-            restored_value_states = previous_value_magnitude.view(-1, *([1] * (value_states.dim() - 1))) * previous_unit_value_states
-            restored_value_states[self.mask[layer_idx-1] == False] = self.retained_value_states[layer_idx-1]
+            restored_value_states = previous_value_magnitude[0:1, :, :].unsqueeze(-1) * previous_unit_value_states
+            restored_value_states[self.mask[layer_idx-1]] = self.retained_value_cache[layer_idx].view(-1, 128)
 
             return restored_key_states, restored_value_states
         elif layer_idx % 2 == 0:
@@ -397,12 +405,14 @@ class DynamicCache(Cache):
             unit_value_states = self.value_unit_cache[layer_idx]
             key_magnitude = self.key_magnitude[layer_idx]
             value_magnitude = self.value_magnitude[layer_idx]
+            # print('decode:', key_magnitude.shape,unit_key_states.shape)
 
-            restored_key_states = key_magnitude.view(-1, *([1] * (key_states.dim() - 1))) * unit_key_states
-            restored_key_states[self.mask[layer_idx] == False] = self.retained_key_states[layer_idx]
+            restored_key_states = key_magnitude[1:2, :, :].unsqueeze(-1) * unit_key_states
+  
+            restored_key_states[self.mask[layer_idx]] = self.retained_key_cache[layer_idx].view(-1, 128)
 
-            restored_value_states = value_magnitude.view(-1, *([1] * (value_states.dim() - 1))) * unit_value_states
-            restored_value_states[self.mask[layer_idx] == False] = self.retained_value_states[layer_idx]
+            restored_value_states = value_magnitude[1:2, :, :].unsqueeze(-1) * unit_value_states
+            restored_value_states[self.mask[layer_idx]] = self.retained_value_cache[layer_idx].view(-1, 128)
 
             return restored_key_states, restored_value_states
     @classmethod

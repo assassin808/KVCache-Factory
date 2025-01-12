@@ -562,7 +562,7 @@ def llama_attn_forward_MiniCache(
     attn_output = torch.matmul(attn_weights, value_states)
 
 
-
+    del key_states, value_states
 
     if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
         raise ValueError(

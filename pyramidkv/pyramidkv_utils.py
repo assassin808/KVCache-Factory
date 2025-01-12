@@ -544,9 +544,8 @@ class MiniCacheKVCluster:
 
         else:
             bsz, num_heads, seq_len, head_dim = key_states.shape
-            N = seq_len * num_heads
-            n = int(N * (4 * self.compression_ratio - 2) / (3 - self.compression_ratio))
-
+            N = seq_len #* num_heads
+            n = int(4 * N * (1 - self.compression_ratio))
             if layer_idx % 2 == 0:
                 # 1. Calculate unit vectors (unit_k, unit_v) using ALL key and value states:
 
@@ -555,6 +554,7 @@ class MiniCacheKVCluster:
                 mag_km1 = torch.norm(previous_key_states, dim=-1)
                 mag_v = torch.norm(value_states, dim=-1)
                 mag_vm1 = torch.norm(previous_value_states, dim=-1)
+                # print('cluster:',  mag_k.shape)
 
                 # Calculate unit vectors for all k, v, prev_k, prev_v
                 e_k_l = key_states / mag_k.unsqueeze(-1)
@@ -573,20 +573,20 @@ class MiniCacheKVCluster:
                 # 3. Create the mask based on top_n_indices:
                 mask = torch.ones(bsz, num_heads, seq_len, dtype=torch.bool, device=key_states.device)
                 mask = mask.scatter(2, top_n_indices, 0)  # Set the top_n_indices to False (0)False
-
                 # 4. Group only the UNSELECTED elements:
                 
                 #   - Invert the mask to select the unselected elements.
                 #   - Use masked_select to get a flattened view of the unselected elements.
                 #   - Reshape the flattened view to group the unselected elements together.
                 
-                unselected_k = key_states.masked_select(~mask.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
-                unselected_v = value_states.masked_select(~mask.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
-                unselected_km1 = previous_key_states.masked_select(~mask.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
-                unselected_vm1 = previous_value_states.masked_select(~mask.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
+                unselected_k = key_states.masked_select(mask.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
+                unselected_v = value_states.masked_select(mask.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
+                unselected_km1 = previous_key_states.masked_select(mask.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
+                unselected_vm1 = previous_value_states.masked_select(mask.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
+                # print('cluster',layer_idx,unselected_k.shape)
 
-                mag_k_cat = torch.cat((mag_k, mag_km1), dim=-1)
-                mag_v_cat = torch.cat((mag_v, mag_vm1), dim=-1)
+                mag_k_cat = torch.cat((mag_k, mag_km1), dim=0)
+                mag_v_cat = torch.cat((mag_v, mag_vm1), dim=0)
 
                 # 5. Return the necessary values:
                 return unselected_k, unselected_v, unit_k, unit_v, mag_k_cat, mag_v_cat, mask, unselected_km1, unselected_vm1
@@ -1068,7 +1068,7 @@ def init_MiniCacheKV(self, num_hidden_layers):
 
     
     self.kv_cluster = MiniCacheKVCluster(
-         compression_ratio=0.5,
+         compression_ratio=0.8,
          num_layers = num_hidden_layers,
         )
 
