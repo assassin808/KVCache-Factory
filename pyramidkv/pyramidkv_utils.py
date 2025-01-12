@@ -563,7 +563,7 @@ class MiniCacheKVCluster:
                 e_v_lm1 = previous_value_states / mag_vm1.unsqueeze(-1)
 
 
-                angle = torch.einsum("bhsd,bhsd->bhs", e_k_l, e_k_lm1)
+                angle = torch.einsum("bhsd,bhsd->bhs", e_k_l, e_k_lm1).unsqueeze(-1)
                 # Calculate unit_k and unit_v using all elements, using SLERP:
                 unit_k = torch.sin(angle/2)/torch.sin(angle) * e_k_l + torch.sin(angle/2)/torch.sin(angle) * e_k_lm1
                 unit_v = torch.sin(angle/2)/torch.sin(angle) * e_v_l + torch.sin(angle/2)/torch.sin(angle) * e_v_lm1
