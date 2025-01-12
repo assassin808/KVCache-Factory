@@ -572,8 +572,7 @@ class MiniCacheKVCluster:
 
                 # 3. Create the mask based on top_n_indices:
                 mask = torch.ones(bsz, num_heads, seq_len, dtype=torch.bool, device=key_states.device)
-                top_n_indices_expanded = top_n_indices.unsqueeze(1).expand(-1, num_heads, -1)
-                mask.scatter_(2, top_n_indices_expanded, False)  # Set selected (most similar) indices to False
+                mask = mask.scatter(2, top_n_indices, 0)  # Set the top_n_indices to False (0)False
 
                 # 4. Group only the UNSELECTED elements:
                 
