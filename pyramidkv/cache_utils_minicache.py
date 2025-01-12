@@ -304,11 +304,11 @@ class DynamicCache(Cache):
         """
         Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx` and the previous `key_states` and `value_states`.
         """
-        # Update the number of seen tokens
+        # Update the number of seen token 
         try:
-            print('prefill:',layer_idx, self.retained_key_cache[layer_idx].shape,key_states.shape)
+            print('prefill:',layer_idx, self.retained_key_cache[layer_idx].shape,key_states.shape,len(self.key_unit_cache))
         except Exception as e:
-            print('prefill:',layer_idx, None)
+            print('prefill:',layer_idx, None,len(self.key_unit_cache))
         if layer_idx <= num_layers//2 or layer_idx == num_layers-1 or layer_idx % 2 == 1:
             self.key_unit_cache.append(None)
             self.value_unit_cache.append(None)
@@ -348,9 +348,9 @@ class DynamicCache(Cache):
         # Update the cache
         assert len(self.retained_key_cache) > layer_idx
         try:
-            print('decode:',layer_idx, self.retained_key_cache[layer_idx].shape,key_states.shape)
+            print('decode:',layer_idx, self.retained_key_cache[layer_idx].shape,key_states.shape,len(self.key_unit_cache))
         except Exception as e:
-            print('decode:',layer_idx, None)
+            print('decode:',layer_idx, None, len(self.key_unit_cache))
         if layer_idx <= num_layers//2 or layer_idx == num_layers-1 or layer_idx % 2 == 1:
             self.retained_key_cache[layer_idx] = torch.cat([self.retained_key_cache[layer_idx], key_states], dim=-2)
             self.retained_value_cache[layer_idx] = torch.cat([self.retained_value_cache[layer_idx], value_states], dim=-2)
@@ -377,7 +377,6 @@ class DynamicCache(Cache):
             return self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx]
         
         elif layer_idx % 2 == 1:
-            # access the previous layer's key and value cache
             previous_unit_key_states = self.key_unit_cache[layer_idx-1]
             previous_unit_value_states = self.value_unit_cache[layer_idx-1]
             previous_key_magnitude = self.key_magnitude[layer_idx-1]

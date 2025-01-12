@@ -577,12 +577,12 @@ class MiniCacheKVCluster:
                 # get a bool mask to select selected indices, so we can use restored_k[mask==False] = retained_k to replace with the unselected kv
                 mask = torch.ones(bsz, num_heads, seq_len, head_dim, dtype=torch.bool, device=key_states.device)
 
-                                # No need to change how you index now that the mask has the right shape
+                # No need to change how you index now that the mask has the right shape
                 unselected_k = key_states.masked_select(~mask).view(bsz, num_heads, -1, head_dim)
                 unselected_v = value_states.masked_select(~mask).view(bsz, num_heads, -1, head_dim)
                 unselected_km1 = previous_key_states.masked_select(~mask).view(bsz, num_heads, -1, head_dim)
                 unselected_vm1 = previous_value_states.masked_select(~mask).view(bsz, num_heads, -1, head_dim)
-                print('cluster:',unselected_k.shape)
+
                 return unselected_k, unselected_v, unit_k, unit_v, mag_k_cat, mag_v_cat, mask, unselected_km1, unselected_vm1
             else:
                 return None, None, None, None, None, None, None, None, None,
