@@ -569,7 +569,7 @@ class MiniCacheKVCluster:
                 unit_v = torch.sin(angle/2)/torch.sin(angle) * e_v_l + torch.sin(angle/2)/torch.sin(angle) * e_v_lm1
 
                 # 2. Calculate similarity and determine the top_n_indices (for masking):
-                kv_similarity = self._calculate_similarity(torch.cat((key_states, value_states), dim=-1), torch.cat((previous_key_states, previous_value_states), dim=-1))
+                kv_similarity = self._calculate_similarity(torch.cat((e_k_l, e_v_l), dim=-1), torch.cat((e_k_lm1, e_v_lm1), dim=-1))
                 _, top_n_indices = torch.topk(kv_similarity, n, dim=-1)  # These are indices of most SIMILAR items
 
                 # 3. Create the mask based on top_n_indices:
