@@ -404,7 +404,7 @@ class DynamicCache(Cache):
             self.value_cache[layer_idx] = self.value_cache[layer_idx][indices, ...]
 
 
-class Minicache(Cache):
+class MiniCache(Cache):
     """
     A cache that store K and V differently, which enables strategical cross layer sharing of K and V.  
     """

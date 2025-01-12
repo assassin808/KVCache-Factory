@@ -470,7 +470,7 @@ def llama_attn_forward_MiniCache(
     bsz, q_len, _ = hidden_states.size()
 
     # Initialize MiniCacheKVCluster and MiniCache if they don't exist
-    init_MiniCacheKV(self, num_hidden_layers=self.config.num_hidden_layers, past_key_value=past_key_value)
+    init_MiniCacheKV(self, num_hidden_layers=self.config.num_hidden_layers)
     if self.config.pretraining_tp > 1:
         key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
         query_slices = self.q_proj.weight.split(
