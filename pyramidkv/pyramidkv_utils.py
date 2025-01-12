@@ -562,9 +562,11 @@ class MiniCacheKVCluster:
                 e_k_lm1 = previous_key_states / mag_km1.unsqueeze(-1)
                 e_v_lm1 = previous_value_states / mag_vm1.unsqueeze(-1)
 
-                # Calculate unit_k and unit_v using all elements
-                unit_k = (e_k_l + e_k_lm1) / 2
-                unit_v = (e_v_l + e_v_lm1) / 2
+
+                angle = torch.einsum("bhsd,bhsd->bhs", e_k_l, e_k_lm1)
+                # Calculate unit_k and unit_v using all elements, using SLERP:
+                unit_k = torch.sin(angle/2)/torch.sin(angle) * e_k_l + torch.sin(angle/2)/torch.sin(angle) * e_k_lm1
+                unit_v = torch.sin(angle/2)/torch.sin(angle) * e_v_l + torch.sin(angle/2)/torch.sin(angle) * e_v_lm1
 
                 # 2. Calculate similarity and determine the top_n_indices (for masking):
                 kv_similarity = self._calculate_similarity(torch.cat((key_states, value_states), dim=-1), torch.cat((previous_key_states, previous_value_states), dim=-1))

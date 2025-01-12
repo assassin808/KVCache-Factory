@@ -391,11 +391,11 @@ class DynamicCache(Cache):
             previous_key_magnitude = self.key_magnitude[layer_idx-1]
             previous_value_magnitude = self.value_magnitude[layer_idx-1]
 
-            # use magnitude[1] * previous_unit_key_states + magnitude[0] * unit_key_states
-            restored_key_states = previous_key_magnitude[0:1, :, :].unsqueeze(-1) * previous_unit_key_states
+            # use magnitude[1] * previous_unit_key_states / mag(previous_unit_key_states) + magnitude[0] * unit_key_states / mag(unit_key_states)
+            restored_key_states = previous_key_magnitude[0:1, :, :].unsqueeze(-1) * previous_unit_key_states / torch.norm(previous_unit_key_states, dim=-1, keepdim=True)
             restored_key_states[self.mask[layer_idx-1]] = self.retained_key_cache[layer_idx].view(-1, 128)
 
-            restored_value_states = previous_value_magnitude[0:1, :, :].unsqueeze(-1) * previous_unit_value_states
+            restored_value_states = previous_value_magnitude[0:1, :, :].unsqueeze(-1) * previous_unit_value_states / torch.norm(previous_unit_value_states, dim=-1, keepdim=True)
             restored_value_states[self.mask[layer_idx-1]] = self.retained_value_cache[layer_idx].view(-1, 128)
 
             return restored_key_states, restored_value_states
@@ -407,11 +407,11 @@ class DynamicCache(Cache):
             value_magnitude = self.value_magnitude[layer_idx]
             # print('decode:', key_magnitude.shape,unit_key_states.shape)
 
-            restored_key_states = key_magnitude[1:2, :, :].unsqueeze(-1) * unit_key_states
+            restored_key_states = key_magnitude[1:2, :, :].unsqueeze(-1) * unit_key_states / torch.norm(unit_key_states, dim=-1, keepdim=True)
   
             restored_key_states[self.mask[layer_idx]] = self.retained_key_cache[layer_idx].view(-1, 128)
 
-            restored_value_states = value_magnitude[1:2, :, :].unsqueeze(-1) * unit_value_states
+            restored_value_states = value_magnitude[1:2, :, :].unsqueeze(-1) * unit_value_states / torch.norm(unit_value_states, dim=-1, keepdim=True)
             restored_value_states[self.mask[layer_idx]] = self.retained_value_cache[layer_idx].view(-1, 128)
 
             return restored_key_states, restored_value_states
