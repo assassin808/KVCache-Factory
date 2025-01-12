@@ -413,6 +413,12 @@ class DynamicCache(Cache):
             for layer_idx in range(len(past_key_values)):
                 cache.retained_key_cache.append(past_key_values[layer_idx][0])
                 cache.retained_value_cache.append(past_key_values[layer_idx][1])
+                cache.key_unit_cache.append(past_key_values[layer_idx][2])
+                cache.value_unit_cache.append(past_key_values[layer_idx][3])
+                cache.key_magnitude.append(past_key_values[layer_idx][4])
+                cache.value_magnitude.append(past_key_values[layer_idx][5])
+                cache.mask.append(past_key_values[layer_idx][6])
+
 
         return cache
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
@@ -430,7 +436,7 @@ class DynamicCache(Cache):
         backward compatibility."""
         legacy_cache = ()
         for layer_idx in range(len(self)):
-            legacy_cache += ((self.retained_key_cache[layer_idx],  self.retained_value_cache[layer_idx]),)
+            legacy_cache += ((self.retained_key_cache[layer_idx],  self.retained_value_cache[layer_idx]), self.key_unit_cache[layer_idx], self.value_unit_cache[layer_idx], self.key_magnitude[layer_idx], self.value_magnitude[layer_idx], self.mask[layer_idx])
         return legacy_cache
 
     def crop(self, max_length: int):
