@@ -538,51 +538,58 @@ class MiniCacheKVCluster:
         
         print(f"miniCache compression_ratio {self.compression_ratio}")
 
-        if layer_idx <= self.num_layers//2 or layer_idx == self.num_layers - 1:
+        if layer_idx < self.num_layers//2 or layer_idx == self.num_layers - 1:
             return key_states, value_states, None, None, None, None, None, previous_key_states, previous_value_states
         
+
         else:
             bsz, num_heads, seq_len, head_dim = key_states.shape
             N = seq_len * num_heads
             n = int(N * (4 * self.compression_ratio - 2) / (3 - self.compression_ratio))
+
             if layer_idx % 2 == 0:
-                # concat k and v for similarity calculation
+                # 1. Calculate unit vectors (unit_k, unit_v) using ALL key and value states:
+
+                # Calculate magnitudes for all k, v, prev_k, prev_v
+                mag_k = torch.norm(key_states, dim=-1)
+                mag_km1 = torch.norm(previous_key_states, dim=-1)
+                mag_v = torch.norm(value_states, dim=-1)
+                mag_vm1 = torch.norm(previous_value_states, dim=-1)
+
+                # Calculate unit vectors for all k, v, prev_k, prev_v
+                e_k_l = key_states / mag_k.unsqueeze(-1)
+                e_v_l = value_states / mag_v.unsqueeze(-1)
+                e_k_lm1 = previous_key_states / mag_km1.unsqueeze(-1)
+                e_v_lm1 = previous_value_states / mag_vm1.unsqueeze(-1)
+
+                # Calculate unit_k and unit_v using all elements
+                unit_k = (e_k_l + e_k_lm1) / 2
+                unit_v = (e_v_l + e_v_lm1) / 2
+
+                # 2. Calculate similarity and determine the top_n_indices (for masking):
                 kv_similarity = self._calculate_similarity(torch.cat((key_states, value_states), dim=-1), torch.cat((previous_key_states, previous_value_states), dim=-1))
-                _, top_n_indices = torch.topk(kv_similarity, n, dim=-1)
+                _, top_n_indices = torch.topk(kv_similarity, n, dim=-1)  # These are indices of most SIMILAR items
+
+                # 3. Create the mask based on top_n_indices:
+                mask = torch.ones(bsz, num_heads, seq_len, dtype=torch.bool, device=key_states.device)
+                top_n_indices_expanded = top_n_indices.unsqueeze(1).expand(-1, num_heads, -1)
+                mask.scatter_(2, top_n_indices_expanded, False)  # Set selected (most similar) indices to False
+
+                # 4. Group only the UNSELECTED elements:
                 
-                # Correctly handle expansion
-                top_n_indices_expanded = top_n_indices.unsqueeze(-1).expand(bsz, num_heads, n, head_dim) #expand at dim = -1 will solve the problem
-
-                selected_k_l = torch.gather(key_states, 2, top_n_indices_expanded)
-                selected_v_l = torch.gather(value_states, 2, top_n_indices_expanded)
-                selected_k_lm1 = torch.gather(previous_key_states, 2, top_n_indices_expanded)
-                selected_v_lm1 = torch.gather(previous_value_states, 2, top_n_indices_expanded)
-
-                mag_k = torch.norm(selected_k_l, dim=-1)
-                mag_km1 = torch.norm(selected_k_lm1, dim=-1)
-                mag_v = torch.norm(selected_v_l, dim=-1)
-                mag_vm1 = torch.norm(selected_v_lm1, dim=-1)
+                #   - Invert the mask to select the unselected elements.
+                #   - Use masked_select to get a flattened view of the unselected elements.
+                #   - Reshape the flattened view to group the unselected elements together.
+                
+                unselected_k = key_states.masked_select(~mask.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
+                unselected_v = value_states.masked_select(~mask.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
+                unselected_km1 = previous_key_states.masked_select(~mask.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
+                unselected_vm1 = previous_value_states.masked_select(~mask.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
 
                 mag_k_cat = torch.cat((mag_k, mag_km1), dim=-1)
                 mag_v_cat = torch.cat((mag_v, mag_vm1), dim=-1)
 
-                e_k_l = selected_k_l / mag_k.unsqueeze(-1)
-                e_v_l = selected_v_l / mag_v.unsqueeze(-1)
-                e_k_lm1 = selected_k_lm1 / mag_km1.unsqueeze(-1)
-                e_v_lm1 = selected_v_lm1 / mag_vm1.unsqueeze(-1)
-
-                unit_k = (e_k_l + e_k_lm1) / 2
-                unit_v = (e_v_l + e_v_lm1) / 2
-
-                # get a bool mask to select selected indices, so we can use restored_k[mask==False] = retained_k to replace with the unselected kv
-                mask = torch.ones(bsz, num_heads, seq_len, head_dim, dtype=torch.bool, device=key_states.device)
-
-                # No need to change how you index now that the mask has the right shape
-                unselected_k = key_states.masked_select(~mask).view(bsz, num_heads, -1, head_dim)
-                unselected_v = value_states.masked_select(~mask).view(bsz, num_heads, -1, head_dim)
-                unselected_km1 = previous_key_states.masked_select(~mask).view(bsz, num_heads, -1, head_dim)
-                unselected_vm1 = previous_value_states.masked_select(~mask).view(bsz, num_heads, -1, head_dim)
-
+                # 5. Return the necessary values:
                 return unselected_k, unselected_v, unit_k, unit_v, mag_k_cat, mag_v_cat, mask, unselected_km1, unselected_vm1
             else:
                 return None, None, None, None, None, None, None, None, None,
