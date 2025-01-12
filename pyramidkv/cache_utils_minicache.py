@@ -565,10 +565,23 @@ class Minicache(Cache):
 
             restored_value_states = value_magnitude.view(-1, *([1] * (value_states.dim() - 1))) * unit_value_states
             restored_value_states[self.mask[layer_idx] == False] = self.retained_value_states[layer_idx]
-            
+
             return restored_key_states, restored_value_states
+    @classmethod
+    def from_legacy_cache(cls, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None) -> "MiniCache":
+        """Converts a cache in the legacy cache format into an equivalent `MiniCache`. Used for
+        backward compatibility."""
+        cache = cls()
+        if past_key_values is not None:
+            for layer_idx in range(len(past_key_values)):
+                cache.retained_key_cache[layer_idx].append(past_key_values[layer_idx])
+                cache.retained_value_cache[layer_idx].append(past_key_values[layer_idx])
 
-
-
+        return cache
+    def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
+        """Returns the sequence length of the cached states. A layer index can be optionally passed."""
+        if len(self.retained_key_cache) <= layer_idx:
+            return 0
+        return self.retained_key_cache[layer_idx].shape[-2] + self.retained_value_cache[layer_idx].shape[-2]
             
         
