@@ -286,7 +286,7 @@ class DynamicCache(Cache):
         self.retained_key_cache.append(key_states)
         self.retained_value_cache.append(value_states)
 
-        return self.key_cache[layer_idx], self.value_cache[layer_idx]
+        return self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx]
     def update_update_miniCache(
             self,
             key_states: torch.Tensor,
