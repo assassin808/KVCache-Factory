@@ -263,7 +263,7 @@ class DynamicCache(Cache):
         value_states: torch.Tensor,
         layer_idx: int,
         cache_kwargs: Optional[Dict[str, Any]] = None,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor = None, 
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
@@ -277,9 +277,11 @@ class DynamicCache(Cache):
                 The index of the layer to cache the states for.
             cache_kwargs (`Dict[str, Any]`, `optional`):
                 Additional arguments for the cache subclass. No additional arguments are used in `DynamicCache`.
+            hidden_states (`torch.Tensor`, `optional`):
+                The hidden states for the layer `layer_idx`.
 
         Return:
-            A tuple containing the updated key and value states.
+            A tuple containing the updated key, value states and hidden states.
         """
         # Update the number of seen tokens
         if layer_idx == 0:
@@ -310,95 +312,6 @@ class DynamicCache(Cache):
         """
         Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx` and the previous `key_states` and `value_states`.
         """
-        # Update the number of seen token 
-        # try:
-        #     print('prefill:',layer_idx, self.retained_key_cache[layer_idx].shape,key_states.shape,len(self.key_unit_cache))
-        # except Exception as e:
-        #     print('prefill:',layer_idx, None,len(self.key_unit_cache))
-
-        # if layer_idx == num_layers - 1:
-            # import torch
-            # import torch.nn.functional as F
-            # def calculate_interlayer_similarity(key_cache_list):
-            #     num_layers = len(key_cache_list)
-            #     similarity_matrix = torch.zeros((num_layers, num_layers))
-
-            #     for i in range(num_layers):
-            #         for j in range(num_layers):
-            #             # Get key caches for the current layer pair
-            #             key_cache_i = key_cache_list[i]  # [batch_size, num_heads, sequence_length, head_dim]
-            #             key_cache_j = key_cache_list[j]
-
-
-            #             # Normalize the key vectors
-            #             key_i_norm = F.normalize(key_cache_i, dim=2)
-            #             key_j_norm = F.normalize(key_cache_j, dim=2)
-
-                       
-            #             # Reshape for matrix multiplication: [batch_size * num_heads * sequence_length, head_dim]
-            #             key_i_reshaped = key_i_norm.reshape(1, -1)
-            #             key_j_reshaped = key_j_norm.reshape(1, -1)
-            #             del key_i_norm, key_j_norm
-                       
-
-            #             # Calculate cosine similarity
-            #             similarity = F.cosine_similarity(key_i_reshaped, key_j_reshaped, dim=1)  # [batch_size * num_heads * sequence_length, batch_size * num_heads * sequence_length]
-            #             del key_i_reshaped, key_j_reshaped
-            #             # Average the similarity
-            #             # Store in the matrix
-            #             similarity_matrix[i, j] = similarity.item()
-                        
-
-            #     return similarity_matrix
-            # def print_tensor_summary(name, tensor):
-            #     """Prints a summary of a tensor, including its shape, type, min, max, mean, and a formatted portion of the data.
-
-            #     Args:
-            #         name: The name of the tensor (e.g., 'key' or 'value').
-            #         tensor: The tensor to print.
-            #     """
-
-            #     print(f"--- {name.upper()} TENSOR SUMMARY ---")
-            #     print(f"  Shape: {tensor.shape}")
-            #     print(f"  Data Type: {tensor.dtype}")
-            #     print(f"  Min: {tensor.min().item():.4f}")
-            #     print(f"  Max: {tensor.max().item():.4f}")
-            #     print(f"  Mean: {tensor.mean().item():.4f}")
-            #     print(f"  Standard Deviation: {tensor.std().item():.4f}")
-
-            #     # Format a portion of the tensor for printing
-            #     if tensor.ndim > 2:
-            #         # For higher-dimensional tensors, print a slice
-            #         print("  Data (first slice):")
-            #         for i in range(min(tensor.shape[0], 3)): # Print up to the first 3 slices/batches
-            #             print(tensor[i,:,:4,:4])  #Print the top left corner
-            #     elif tensor.ndim == 2:
-            #         print("  Data (first few rows and columns):")
-            #         print(tensor[:8, :8])  # Print a small section
-            #     else:
-            #         print("  Data (first few elements):")
-            #         print(tensor[:10])
-
-            #     print("-" * 30 + "\n")
-
-            #     # Assuming you have your calculate_interlayer_similarity function and the retained caches:
-            #     # Example:
-            #     # def calculate_interlayer_similarity(cache):
-            #     #   # ... your similarity calculation ...
-            #     #   return similarity_tensor
-
-            #     # Example retained caches (replace with your actual data):
-            #     # self.retained_key_cache = torch.randn(1, 32, 50, 128)
-            #     # self.retained_value_cache = torch.randn(1, 32, 50, 128)
-
-            #     # Now print the summaries:
-            # # import numpy as np
-            # # print_tensor_summary('key', calculate_interlayer_similarity(self.retained_key_cache))
-            # # print_tensor_summary('value', calculate_interlayer_similarity(self.retained_value_cache))
-            # # similarity_matrix_np = calculate_interlayer_similarity(self.retained_key_cache).cpu().numpy()
-            # np.savetxt("similarity_matrix.csv", similarity_matrix_np, delimiter=",")
-            # exit(0)
-
 
         if layer_idx < num_layers//4:
             self.key_unit_cache.append(None)
@@ -447,10 +360,7 @@ class DynamicCache(Cache):
 
         # Update the cache
         assert len(self.retained_key_cache) > layer_idx
-        # try:
-        #     print('decode:',layer_idx, self.retained_key_cache[layer_idx].shape,key_states.shape,len(self.key_unit_cache))
-        # except Exception as e:
-        #     print('decode:',layer_idx, None, len(self.key_unit_cache))
+
         if layer_idx < num_layers//4 or layer_idx % 2 == 1:
             self.retained_key_cache[layer_idx] = torch.cat([self.retained_key_cache[layer_idx], key_states], dim=-2)
             self.retained_value_cache[layer_idx] = torch.cat([self.retained_value_cache[layer_idx], value_states], dim=-2)
