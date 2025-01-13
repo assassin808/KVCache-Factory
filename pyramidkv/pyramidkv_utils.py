@@ -538,8 +538,8 @@ class MiniCacheKVCluster:
             bsz, num_heads, seq_len, head_dim = key_states.shape
             N = seq_len #* num_heads
             n = int(4 * N * (1 - self.compression_ratio))
-            if layer_idx == self.num_layers - 1:
-                n = 0
+            # if layer_idx == self.num_layers - 1:
+            #     n = 0
 
             if layer_idx % 2 == 1:
                 # 1. Calculate unit vectors (unit_k, unit_v) using ALL key and value states:
@@ -579,8 +579,8 @@ class MiniCacheKVCluster:
 
 
                 # Calculate unit_k and unit_v using all elements, using SLERP:
-                unit_k = torch.sin(angle_k*0.6)/torch.sin(angle_k) * e_k_l + torch.sin(angle_k*0.4)/torch.sin(angle_k) * e_k_lm1
-                unit_v = torch.sin(angle_v*0.6)/torch.sin(angle_v) * e_v_l + torch.sin(angle_v*0.4)/torch.sin(angle_v) * e_v_lm1
+                unit_k = torch.sin(angle_k*0.4)/torch.sin(angle_k) * e_k_l + torch.sin(angle_k*0.6)/torch.sin(angle_k) * e_k_lm1
+                unit_v = torch.sin(angle_v*0.4)/torch.sin(angle_v) * e_v_l + torch.sin(angle_v*0.6)/torch.sin(angle_v) * e_v_lm1
 
                 # 2. Calculate similarity and multiply with attention score to get top_n_indices:
 
@@ -1089,7 +1089,7 @@ def init_MiniCacheKV(self, num_hidden_layers):
 
     
     self.kv_cluster = MiniCacheKVCluster(
-         compression_ratio=0.9,
+         compression_ratio=0.8,
          num_layers = num_hidden_layers,
         )
 
