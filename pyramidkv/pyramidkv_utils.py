@@ -570,7 +570,21 @@ class MiniCacheKVCluster:
 
                 # print(hidden_states.shape)
                 hidden_similarity = torch.einsum("bsd,bsd->bs", hidden_states, previous_hidden_states)
+
                 
+                # hidden_similarity is now of shape [1, n]
+                # the k cache is of shape [1,32,n,128]
+                # the v cache is of shape [1,32,n,128]
+                # the mask should be of shape [1,32,n]
+                # Use hidden states similarity to select key and value cache
+                # so if the hidden state of a token is high, we selected the key cache and value cache of that token for all heads
+
+                hidden_similarity = hidden_similarity.unsqueeze(-1).unsqueeze(-1).expand(hidden_similarity.shape[0], hidden_similarity.shape[1], n, head_dim)
+                print(hidden_similarity.shape)
+
+
+
+                                
 
                 # n = attn_weights.shape[-1]
                 # mask = torch.tril(torch.ones((n, n), device=attn_weights.device)).unsqueeze(0).unsqueeze(0) # Create a lower triangular mask [1, 1, n, n]
@@ -591,9 +605,9 @@ class MiniCacheKVCluster:
                 # 2. Calculate similarity and multiply with attention score to get top_n_indices:
 
                 # avg_attn_weights = torch.mean(attn_weights, dim=-1)
-                _, top_n_indices_k = torch.topk(k_similarity , n, dim=-1)  # These are indices of most SIMILAR items
+                _, top_n_indices_k = torch.topk(hidden_similarity , n, dim=-1)  # These are indices of most SIMILAR items
                 
-                _, top_n_indices_v = torch.topk(v_similarity , n, dim=-1)  # These are indices of most SIMILAR items
+                _, top_n_indices_v = torch.topk(hidden_similarity , n, dim=-1)  # These are indices of most SIMILAR items
 
                 # 3. Create the mask based on top_n_indices:
                 mask_k = torch.ones(bsz, num_heads, seq_len, dtype=torch.bool, device=key_states.device)
