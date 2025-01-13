@@ -528,9 +528,9 @@ class MiniCacheKVCluster:
         assert key_states.shape[-2] == query_states.shape[-2]
         bsz, num_heads, q_len, head_dim = query_states.shape
         
-        print(f"miniCache compression_ratio {self.compression_ratio}")
+        # print(f"miniCache compression_ratio {self.compression_ratio}")
 
-        if layer_idx < self.num_layers//4:
+        if layer_idx < self.num_layers//8:
             return key_states, value_states, None, None, None, None, None, None, previous_key_states, previous_value_states
         
 
@@ -541,7 +541,7 @@ class MiniCacheKVCluster:
             if layer_idx == self.num_layers - 1:
                 n = 0
             # n = int(n * (layer_idx + 1) / self.num_layers)
-
+            n = 0
             # get attention
             # attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim)
             # causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
@@ -569,7 +569,12 @@ class MiniCacheKVCluster:
                 angle_v = torch.acos(v_similarity).unsqueeze(-1)
 
                 # print(hidden_states.shape)
-                hidden_similarity = torch.einsum("bsd,bsd->bs", hidden_states, previous_hidden_states)
+                # print(previous_hidden_states.shape)
+
+                hidden_states_mag = torch.norm(hidden_states, dim=-1)
+                previous_hidden_states_mag = torch.norm(previous_hidden_states, dim=-1)
+
+                hidden_similarity = torch.einsum("bsd,bsd->bs", hidden_states / hidden_states_mag.unsqueeze(-1), previous_hidden_states / previous_hidden_states_mag.unsqueeze(-1))
 
                 
                 # hidden_similarity is now of shape [1, n]
@@ -579,8 +584,8 @@ class MiniCacheKVCluster:
                 # Use hidden states similarity to select key and value cache
                 # so if the hidden state of a token is high, we selected the key cache and value cache of that token for all heads
 
-                hidden_similarity = hidden_similarity.unsqueeze(-1).unsqueeze(-1).expand(hidden_similarity.shape[0], hidden_similarity.shape[1], n, head_dim)
-                print(hidden_similarity.shape)
+                hidden_similarity = hidden_similarity.unsqueeze(1).repeat(1, 32, 1)
+                # print(hidden_similarity.shape)
 
 
 
