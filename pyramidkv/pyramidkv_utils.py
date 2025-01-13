@@ -522,7 +522,7 @@ class MiniCacheKVCluster:
         self.num_layers = num_layers
 
 
-    def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups, layer_idx, previous_key_states, previous_value_states):
+    def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups, layer_idx, previous_key_states, previous_value_states, hidden_states, previous_hidden_states):
         
         # check if prefix phase
         assert key_states.shape[-2] == query_states.shape[-2]
@@ -530,7 +530,7 @@ class MiniCacheKVCluster:
         
         print(f"miniCache compression_ratio {self.compression_ratio}")
 
-        if layer_idx < self.num_layers//2:
+        if layer_idx < self.num_layers//4:
             return key_states, value_states, None, None, None, None, None, None, previous_key_states, previous_value_states
         
 
@@ -538,16 +538,15 @@ class MiniCacheKVCluster:
             bsz, num_heads, seq_len, head_dim = key_states.shape
             N = seq_len #* num_heads
             n = int(4 * N * (1 - self.compression_ratio))
-            # if layer_idx == self.num_layers - 1:
-            #     n = 1
+            if layer_idx == self.num_layers - 1:
+                n = 0
+            # n = int(n * (layer_idx + 1) / self.num_layers)
 
             # get attention
-            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim)
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            attn_weights = attn_weights + causal_mask
-            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-
-
+            # attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim)
+            # causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+            # attn_weights = attn_weights + causal_mask
+            # attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
             if layer_idx % 2 == 1:
                 # 1. Calculate unit vectors (unit_k, unit_v) using ALL key and value states:
 
@@ -569,7 +568,21 @@ class MiniCacheKVCluster:
                 angle_k = torch.acos(k_similarity).unsqueeze(-1)
                 angle_v = torch.acos(v_similarity).unsqueeze(-1)
 
+                # print(hidden_states.shape)
+                hidden_similarity = torch.einsum("bsd,bsd->bs", hidden_states, previous_hidden_states)
+                
 
+                # n = attn_weights.shape[-1]
+                # mask = torch.tril(torch.ones((n, n), device=attn_weights.device)).unsqueeze(0).unsqueeze(0) # Create a lower triangular mask [1, 1, n, n]
+                # masked_attn = attn_weights * mask  # Apply the mask
+                
+                # attn_sums = masked_attn.sum(dim=-1)  # Sum across the key/value dimension [1, 32, n]
+                # attn_counts = mask.sum(dim=-1)  # Count the number of attended-to tokens [1, 1, n]
+                
+                # # Avoid division by zero (for the first token, which might have no preceding tokens)
+                # attn_counts = torch.max(attn_counts, torch.tensor(1).to(attn_counts.device))
+
+                # avg_attn = attn_sums / attn_counts  # Calculate the average [1, 32, n]
 
                 # Calculate unit_k and unit_v using all elements, using SLERP:
                 unit_k = torch.sin(angle_k*0.6)/torch.sin(angle_k) * e_k_l + torch.sin(angle_k*0.4)/torch.sin(angle_k) * e_k_lm1
@@ -577,10 +590,10 @@ class MiniCacheKVCluster:
 
                 # 2. Calculate similarity and multiply with attention score to get top_n_indices:
 
+                # avg_attn_weights = torch.mean(attn_weights, dim=-1)
+                _, top_n_indices_k = torch.topk(k_similarity , n, dim=-1)  # These are indices of most SIMILAR items
                 
-                _, top_n_indices_k = torch.topk(k_similarity * attn_weights, n, dim=-1)  # These are indices of most SIMILAR items
-                
-                _, top_n_indices_v = torch.topk(v_similarity * attn_weights, n, dim=-1)  # These are indices of most SIMILAR items
+                _, top_n_indices_v = torch.topk(v_similarity , n, dim=-1)  # These are indices of most SIMILAR items
 
                 # 3. Create the mask based on top_n_indices:
                 mask_k = torch.ones(bsz, num_heads, seq_len, dtype=torch.bool, device=key_states.device)

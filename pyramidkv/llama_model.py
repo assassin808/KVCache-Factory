@@ -534,14 +534,14 @@ def llama_attn_forward_MiniCache(
 
         if key_states.shape[-2] == kv_seq_len:
             self.kv_seq_len = kv_seq_len
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states, hidden_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
             if self.layer_idx == 0:
-                previous_key_states, previous_value_states = None, None
+                previous_key_states, previous_value_states, previous_hidden_states = None, None, None
             else:
-                previous_key_states, previous_value_states = past_key_value.retained_key_cache[self.layer_idx - 1], past_key_value.retained_value_cache[self.layer_idx - 1]
+                previous_key_states, previous_value_states, previous_hidden_states = past_key_value.retained_key_cache[self.layer_idx - 1], past_key_value.retained_value_cache[self.layer_idx - 1], past_key_value.hidden_states[self.layer_idx - 1]
    
-            retained_key_states, retained_value_states, unit_key_states, unit_value_states, key_magnitude, value_magnitude, mask_k, mask_v, previous_retained_key_states, previous_retained_value_states = self.kv_cluster.update_kv(key_states, query_states, value_states, attention_mask, self.num_key_value_groups, self.layer_idx, previous_key_states, previous_value_states)
+            retained_key_states, retained_value_states, unit_key_states, unit_value_states, key_magnitude, value_magnitude, mask_k, mask_v, previous_retained_key_states, previous_retained_value_states = self.kv_cluster.update_kv(key_states, query_states, value_states, attention_mask, self.num_key_value_groups, self.layer_idx, previous_key_states, previous_value_states, hidden_states, previous_hidden_states)
 
             past_key_value.update_miniCache(retained_key_states, retained_value_states, unit_key_states, unit_value_states, key_magnitude, value_magnitude, mask_k, mask_v, previous_retained_key_states, previous_retained_value_states, self.layer_idx, self.config.num_hidden_layers)
         else:
