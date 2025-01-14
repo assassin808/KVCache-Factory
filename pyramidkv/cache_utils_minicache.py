@@ -263,7 +263,7 @@ class DynamicCache(Cache):
         value_states: torch.Tensor,
         layer_idx: int,
         cache_kwargs: Optional[Dict[str, Any]] = None,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
