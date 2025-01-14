@@ -540,13 +540,7 @@ class MiniCacheKVCluster:
             n = int(4 * N * (1 - self.compression_ratio))
             if layer_idx == self.num_layers - 1:
                 n = 0
-            # n = int(n * (layer_idx + 1) / self.num_layers)
 
-            # get attention
-            # attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim)
-            # causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            # attn_weights = attn_weights + causal_mask
-            # attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
             if layer_idx % 2 == 1:
                 # 1. Calculate unit vectors (unit_k, unit_v) using ALL key and value states:
 
@@ -579,24 +573,10 @@ class MiniCacheKVCluster:
                 # Use hidden states similarity to select key and value cache
                 # so if the hidden state of a token is high, we selected the key cache and value cache of that token for all heads
 
-                hidden_similarity = hidden_similarity.unsqueeze(-1).expand(hidden_similarity.shape[0], 32, hidden_similarity.shape[1])
-                print(hidden_similarity.shape)
+                hidden_similarity = hidden_similarity.unsqueeze(1).repeat(1, 32, 1)
+                # print(hidden_similarity.shape)
 
 
-
-                                
-
-                # n = attn_weights.shape[-1]
-                # mask = torch.tril(torch.ones((n, n), device=attn_weights.device)).unsqueeze(0).unsqueeze(0) # Create a lower triangular mask [1, 1, n, n]
-                # masked_attn = attn_weights * mask  # Apply the mask
-                
-                # attn_sums = masked_attn.sum(dim=-1)  # Sum across the key/value dimension [1, 32, n]
-                # attn_counts = mask.sum(dim=-1)  # Count the number of attended-to tokens [1, 1, n]
-                
-                # # Avoid division by zero (for the first token, which might have no preceding tokens)
-                # attn_counts = torch.max(attn_counts, torch.tensor(1).to(attn_counts.device))
-
-                # avg_attn = attn_sums / attn_counts  # Calculate the average [1, 32, n]
 
                 # Calculate unit_k and unit_v using all elements, using SLERP:
                 unit_k = torch.sin(angle_k*0.6)/torch.sin(angle_k) * e_k_l + torch.sin(angle_k*0.4)/torch.sin(angle_k) * e_k_lm1
