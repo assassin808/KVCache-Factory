@@ -579,7 +579,7 @@ class MiniCacheKVCluster:
                 # Use hidden states similarity to select key and value cache
                 # so if the hidden state of a token is high, we selected the key cache and value cache of that token for all heads
 
-                hidden_similarity = hidden_similarity.unsqueeze(-1).unsqueeze(-1).expand(hidden_similarity.shape[0], hidden_similarity.shape[1], n, head_dim)
+                hidden_similarity = hidden_similarity.unsqueeze(-1).expand(hidden_similarity.shape[0], 32, hidden_similarity.shape[1])
                 print(hidden_similarity.shape)
 
 
