@@ -301,8 +301,8 @@ class DynamicCache(Cache):
                 for i in range(num_layers):
                     for j in range(num_layers):
                         # Get key caches for the current layer pair
-                        key_cache_i = key_cache_list[i][0]  # [batch_size, num_heads, sequence_length, head_dim]
-                        key_cache_j = key_cache_list[j][0]
+                        key_cache_i = key_cache_list[i][0][0]  # [batch_size, num_heads, sequence_length, head_dim]
+                        key_cache_j = key_cache_list[j][0][0]
 
 
                         # Normalize the key vectors
@@ -316,34 +316,35 @@ class DynamicCache(Cache):
                         key_i_reshaped = key_cache_i / key_i_norm
                         key_j_reshaped = key_cache_j / key_j_norm
                         # del key_i_norm, key_j_norm
-                        print(torch.mm(key_i_reshaped, key_j_reshaped.T)[0][0])
+                        # print(torch.mm(key_i_reshaped, key_j_reshaped.T)[0][0])
 
                         
+                        if i+1==j and i%2==1:
+                            import matplotlib.pyplot as plt
+                            import numpy as np
+                            fig, ax = plt.subplots(figsize=(10, 10))  # Adjust figure size as needed
+                            heatmap = ax.imshow(torch.mm(key_i_reshaped, key_j_reshaped.T).cpu(), cmap='viridis', interpolation='nearest')
 
-                        # import matplotlib.pyplot as plt
-                        # import numpy as np
-                        # fig, ax = plt.subplots(figsize=(10, 10))  # Adjust figure size as needed
-                        # heatmap = ax.imshow(torch.mm(key_i_reshaped, key_j_reshaped.T).cpu(), cmap='viridis', interpolation='nearest')
+                            # Add a colorbar
+                            cbar = plt.colorbar(heatmap)
 
-                        # # Add a colorbar
-                        # cbar = plt.colorbar(heatmap)
+                            # Set title and labels (optional)
+                            plt.title("Similarity Matrix Heatmap")
+                            plt.xlabel("X-axis Label")
+                            plt.ylabel("Y-axis Label")
 
-                        # # Set title and labels (optional)
-                        # plt.title("Similarity Matrix Heatmap")
-                        # plt.xlabel("X-axis Label")
-                        # plt.ylabel("Y-axis Label")
-
-                        # # Save the heatmap as a PNG image
-                        # plt.savefig("similarity_heatmap.png", dpi=300)  # Adjust dpi for desired resolution
-
-                       # print('key_j_reshaped',key_j_reshaped.shape)
-                        # Calculate cosine similarity
-                        similarity = torch.mm(key_i_reshaped, key_j_reshaped.T)  # [batch_size * num_heads * sequence_length, batch_size * num_heads * sequence_length]
-                        similarity = torch.trace(similarity) / similarity.shape[0]
-                        # del key_i_reshaped, key_j_reshaped
-                        # Average the similarity
-                        # Store in the matrix
-                        similarity_matrix[i, j] = similarity.item()
+                            # Save the heatmap as a PNG image
+                            plt.savefig(f"similarity_heatmap_{i}_{j}.png", dpi=300)  # Adjust dpi for desired resolution
+                            
+                        # print('key_j_reshaped',key_j_reshaped.shape)
+                            # Calculate cosine similarity
+                            similarity = torch.mm(key_i_reshaped, key_j_reshaped.T)  # [batch_size * num_heads * sequence_length, batch_size * num_heads * sequence_length]
+                            similarity = torch.trace(similarity) / similarity.shape[0]
+                            print('mean:', similarity, 'tot:',torch.mm(key_i_reshaped, key_j_reshaped.T).mean())
+                            # del key_i_reshaped, key_j_reshaped
+                            # Average the similarity
+                            # Store in the matrix
+                            similarity_matrix[i, j] = similarity.item()
                         
 
                 return similarity_matrix
