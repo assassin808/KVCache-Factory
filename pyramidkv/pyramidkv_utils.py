@@ -528,7 +528,7 @@ class MiniCacheKVCluster:
         assert key_states.shape[-2] == query_states.shape[-2]
         bsz, num_heads, q_len, head_dim = query_states.shape
         
-        print(f"miniCache compression_ratio {self.compression_ratio}")
+        # print(f"miniCache compression_ratio {self.compression_ratio}")
 
         if layer_idx < self.num_layers//4:
             return key_states, value_states, None, None, None, None, None, None, previous_key_states, previous_value_states
@@ -574,8 +574,10 @@ class MiniCacheKVCluster:
                 # so if the hidden state of a token is high, we selected the key cache and value cache of that token for all heads
 
                 hidden_similarity = hidden_similarity.unsqueeze(1).repeat(1, 32, 1)
-                print(hidden_similarity.shape)
+                # print(hidden_similarity.shape)
 
+                random_k = torch.rand(angle_k.size(), dtype=angle_k.dtype, device=angle_k.device)/2+0.25
+                cong_random_k = 1 - random_k
 
 
                 # Calculate unit_k and unit_v using all elements, using SLERP:
@@ -585,9 +587,9 @@ class MiniCacheKVCluster:
                 # 2. Calculate similarity and multiply with attention score to get top_n_indices:
 
                 # avg_attn_weights = torch.mean(attn_weights, dim=-1)
-                _, top_n_indices_k = torch.topk(hidden_similarity , n, dim=-1)  # These are indices of most SIMILAR items
+                _, top_n_indices_k = torch.topk(-k_similarity , n, dim=-1)  # These are indices of most SIMILAR items
                 
-                _, top_n_indices_v = torch.topk(hidden_similarity , n, dim=-1)  # These are indices of most SIMILAR items
+                _, top_n_indices_v = torch.topk(-k_similarity , n, dim=-1)  # These are indices of most SIMILAR items
 
                 # 3. Create the mask based on top_n_indices:
                 mask_k = torch.ones(bsz, num_heads, seq_len, dtype=torch.bool, device=key_states.device)
