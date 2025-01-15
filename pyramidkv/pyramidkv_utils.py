@@ -537,30 +537,35 @@ class MiniCacheKVCluster:
         else:
             bsz, num_heads, seq_len, head_dim = key_states.shape
             N = seq_len #* num_heads
-            n = int(4 * N * (1 - self.compression_ratio))
+            n = int(4 * N * (1 - self.compression_ratio)) * 0
             if layer_idx == self.num_layers - 1:
-                n = 0
-
+                n = 1
+            n = 1000
+            
             if layer_idx % 2 == 1:
                 # 1. Calculate unit vectors (unit_k, unit_v) using ALL key and value states:
 
                 # Calculate magnitudes for all k, v, prev_k, prev_v
-                mag_k = torch.norm(key_states, dim=-1)
-                mag_km1 = torch.norm(previous_key_states, dim=-1)
-                mag_v = torch.norm(value_states, dim=-1)
-                mag_vm1 = torch.norm(previous_value_states, dim=-1)
+                mag_k = key_states.norm(dim=-1, keepdim=True)
+                mag_km1 = previous_key_states.norm(dim=-1, keepdim=True)
+                mag_v = value_states.norm(dim=-1, keepdim=True)
+                mag_vm1 = previous_value_states.norm(dim=-1, keepdim=True)
                 # print('cluster:',  mag_k.shape)
 
                 # Calculate unit vectors for all k, v, prev_k, prev_v
-                e_k_l = key_states / mag_k.unsqueeze(-1)
-                e_v_l = value_states / mag_v.unsqueeze(-1)
-                e_k_lm1 = previous_key_states / mag_km1.unsqueeze(-1)
-                e_v_lm1 = previous_value_states / mag_vm1.unsqueeze(-1)
+                e_k_l = key_states / mag_k
+                e_v_l = value_states / mag_v
+                e_k_lm1 = previous_key_states / mag_km1
+                e_v_lm1 = previous_value_states / mag_vm1
 
-                k_similarity = torch.einsum("bhsd,bhsd->bhs", e_k_l, e_k_lm1)
-                v_similarity = torch.einsum("bhsd,bhsd->bhs", e_v_l, e_v_lm1)
-                angle_k = torch.acos(k_similarity).unsqueeze(-1)
-                angle_v = torch.acos(v_similarity).unsqueeze(-1)
+                k_similarity = (e_k_l * e_k_lm1).sum(dim=-1, keepdim=True)
+                v_similarity = (e_v_l * e_v_lm1).sum(dim=-1, keepdim=True)
+                angle_k = torch.acos(k_similarity)
+                angle_v = torch.acos(v_similarity)
+
+                print('sim_mean',  k_similarity.shape, k_similarity[0][0].mean())
+                print('sim_mean?', (e_k_l * e_k_l).sum(dim=-1, keepdim=True).mean())
+                print(torch.trace(torch.mm(e_k_l[0][0], e_k_lm1[0][0].T))/e_k_l[0][0].shape[0])
 
                 # print(hidden_states.shape)
                 hidden_similarity = torch.einsum("bsd,bsd->bs", hidden_states, previous_hidden_states)
@@ -600,17 +605,17 @@ class MiniCacheKVCluster:
                 #   - Use masked_select to get a flattened view of the unselected elements.
                 #   - Reshape the flattened view to group the unselected elements together.
                 
-                unselected_k = key_states.masked_select(mask_k.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
+                # unselected_k = key_states.clone().masked_select(mask_k.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
                 unselected_v = value_states.masked_select(mask_v.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
-                unselected_km1 = previous_key_states.masked_select(mask_k.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
+                # unselected_km1 = previous_key_states.clone().masked_select(mask_k.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
                 unselected_vm1 = previous_value_states.masked_select(mask_v.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
                 # print('cluster',layer_idx,unselected_k.shape)
-
+                # print(unselected_k)
                 mag_k_cat = torch.cat((mag_k, mag_km1), dim=0)
                 mag_v_cat = torch.cat((mag_v, mag_vm1), dim=0)
 
                 # 5. Return the necessary values:
-                return unselected_k, unselected_v, unit_k, unit_v, mag_k_cat, mag_v_cat, mask_k, mask_v,  unselected_km1, unselected_vm1
+                return key_states, unselected_v, unit_k, unit_v, mag_k_cat, mag_v_cat, mask_k, mask_v,  previous_key_states, unselected_vm1
             else:
                 return None, None, None, None, None, None, None, None, None, None
 

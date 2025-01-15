@@ -338,6 +338,12 @@ class DynamicCache(Cache):
             self.mask_k.append(None)
             self.mask_v.append(None)
 
+            k1=self.retained_key_cache[layer_idx][0][0]
+            k2=self.retained_key_cache[layer_idx-1][0][0]
+            k1=k1/k1.norm(dim=-1, keepdim=True)
+            k2=k2/k2.norm(dim=-1, keepdim=True)
+            print('?????',torch.trace(torch.mm(k1, k2.T))/k1.shape[0])
+
             self.retained_key_cache[layer_idx] = key_states
             self.retained_value_cache[layer_idx] = value_states
 
