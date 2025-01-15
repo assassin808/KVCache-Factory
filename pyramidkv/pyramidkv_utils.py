@@ -528,7 +528,7 @@ class MiniCacheKVCluster:
         assert key_states.shape[-2] == query_states.shape[-2]
         bsz, num_heads, q_len, head_dim = query_states.shape
         
-        print(f"miniCache compression_ratio {self.compression_ratio}")
+        # print(f"miniCache compression_ratio {self.compression_ratio}")
 
         if layer_idx < self.num_layers//4:
             return key_states, value_states, None, None, None, None, None, None, previous_key_states, previous_value_states
@@ -561,6 +561,8 @@ class MiniCacheKVCluster:
                 v_similarity = torch.einsum("bhsd,bhsd->bhs", e_v_l, e_v_lm1)
                 angle_k = torch.acos(k_similarity).unsqueeze(-1)
                 angle_v = torch.acos(v_similarity).unsqueeze(-1)
+                # k_similarity = torch.einsum("bhsd,bhsd->bhs", key_states, previous_key_states)
+                # v_similarity = torch.einsum("bhsd,bhsd->bhs", value_states, previous_value_states)
 
                 # print(hidden_states.shape)
                 hidden_similarity = torch.einsum("bsd,bsd->bs", hidden_states, previous_hidden_states)
@@ -574,7 +576,7 @@ class MiniCacheKVCluster:
                 # so if the hidden state of a token is high, we selected the key cache and value cache of that token for all heads
 
                 hidden_similarity = hidden_similarity.unsqueeze(1).repeat(1, 32, 1)
-                print(hidden_similarity.shape)
+                # print(hidden_similarity.shape)
 
 
 
@@ -585,9 +587,9 @@ class MiniCacheKVCluster:
                 # 2. Calculate similarity and multiply with attention score to get top_n_indices:
 
                 # avg_attn_weights = torch.mean(attn_weights, dim=-1)
-                _, top_n_indices_k = torch.topk(hidden_similarity , n, dim=-1)  # These are indices of most SIMILAR items
+                _, top_n_indices_k = torch.topk(-hidden_similarity , n, dim=-1)  # These are indices of most SIMILAR items
                 
-                _, top_n_indices_v = torch.topk(hidden_similarity , n, dim=-1)  # These are indices of most SIMILAR items
+                _, top_n_indices_v = torch.topk(-hidden_similarity , n, dim=-1)  # These are indices of most SIMILAR items
 
                 # 3. Create the mask based on top_n_indices:
                 mask_k = torch.ones(bsz, num_heads, seq_len, dtype=torch.bool, device=key_states.device)
@@ -1089,7 +1091,7 @@ def init_MiniCacheKV(self, num_hidden_layers):
 
     
     self.kv_cluster = MiniCacheKVCluster(
-         compression_ratio=0.9,
+         compression_ratio=0.8,
          num_layers = num_hidden_layers,
         )
 

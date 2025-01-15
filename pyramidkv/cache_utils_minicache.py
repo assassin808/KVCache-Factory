@@ -293,7 +293,37 @@ class DynamicCache(Cache):
         self.retained_value_cache.append(value_states)
         self.hidden_states.append(hidden_states)
 
-        return self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx]
+        layer_map = []
+
+        if layer_idx == 31:
+            for i in range(32):
+                for j in range(32):
+                    if i>=j:
+                        continue
+                    k_prev = self.retained_key_cache[i]
+                    k = self.retained_key_cache[j]
+                    k_similarity = torch.einsum("bhsd,bhsd->bhs", k_prev, k).mean().item()
+                    layer_map.append((i,j, k_similarity))
+        layer_map.sort(key=lambda x:x[-1])
+
+        self.key_unit_cache.append(None)
+        self.value_unit_cache.append(None)
+        self.key_magnitude.append(None)
+        self.value_magnitude.append(None)
+        self.mask_k.append(None)
+        self.mask_v.append(None)
+
+
+        ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx])
+
+        temp_key = self.retained_key_cache.copy()
+        temp_value = self.retained_value_cache.copy()
+        for item in layer_map[:8]:
+            self.retained_key_cache[item[1]] = temp_key[item[0]]
+            self.retained_value_cache[item[1]] = temp_value[item[0]]
+
+        del temp_key
+        return ret_value[0], ret_value[1], ret_value[2]
     def update_miniCache(
             self,
             key_states: torch.Tensor,
@@ -361,68 +391,16 @@ class DynamicCache(Cache):
         # Update the cache
         assert len(self.retained_key_cache) > layer_idx
 
-        if layer_idx < num_layers//4 or layer_idx % 2 == 1:
-            self.retained_key_cache[layer_idx] = torch.cat([self.retained_key_cache[layer_idx], key_states], dim=-2)
-            self.retained_value_cache[layer_idx] = torch.cat([self.retained_value_cache[layer_idx], value_states], dim=-2)
 
-        elif layer_idx % 2 == 0:
-
-            self.retained_key_cache[layer_idx] = torch.cat([self.retained_key_cache[layer_idx], key_states], dim=-2)
-            self.retained_value_cache[layer_idx] = torch.cat([self.retained_value_cache[layer_idx], value_states], dim=-2)
-            self.key_unit_cache[layer_idx] = torch.cat([self.key_unit_cache[layer_idx], key_states], dim=-2)
-            self.value_unit_cache[layer_idx] = torch.cat([self.value_unit_cache[layer_idx], value_states], dim=-2)
-            # We want to copy the last element in self.key_magnitude[layer_idx] and concat it with self.key_magnitude[layer_idx]
+       
+        self.retained_key_cache[layer_idx] = torch.cat([self.retained_key_cache[layer_idx], key_states], dim=-2)
+        self.retained_value_cache[layer_idx] = torch.cat([self.retained_value_cache[layer_idx], value_states], dim=-2)
 
 
-            # Create a tensor of zeros with the desired shape for padding
-            padding = torch.zeros((2, 32, 1), device=self.key_magnitude[layer_idx].device,dtype = self.key_magnitude[layer_idx].dtype)
 
-            # Concatenate the original tensor and the padding along the last dimension
-            self.key_magnitude[layer_idx] = torch.cat((self.key_magnitude[layer_idx], padding), dim=-1)
-            self.value_magnitude[layer_idx] = torch.cat((self.value_magnitude[layer_idx], padding), dim=-1)
-
-            # print('mask_bf:',sum(sum(sum(~self.mask[layer_idx]))))
-            
-            # print(new_shape)
-            padding = torch.ones((1, 32, 1), device=self.key_magnitude[layer_idx].device,dtype = self.mask_k[layer_idx].dtype)
-            self.mask_k[layer_idx] = torch.cat((self.mask_k[layer_idx], padding), dim=-1)
-            self.mask_v[layer_idx] = torch.cat((self.mask_v[layer_idx], padding), dim=-1)
-            
-            # print('mask_after:',sum(sum(sum(~self.mask[layer_idx]))))
-            
-            
-        # restore
-        if layer_idx < num_layers//4:
-            return self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx]
-        
-        elif layer_idx % 2 == 1:
-            previous_unit_key_states = self.key_unit_cache[layer_idx-1]
-            previous_unit_value_states = self.value_unit_cache[layer_idx-1]
-            previous_key_magnitude = self.key_magnitude[layer_idx-1]
-            previous_value_magnitude = self.value_magnitude[layer_idx-1]
-
-            # use magnitude[1] * previous_unit_key_states / mag(previous_unit_key_states) + magnitude[0] * unit_key_states / mag(unit_key_states)
-            restored_key_states = previous_key_magnitude[0:1, :, :].unsqueeze(-1) * previous_unit_key_states / torch.norm(previous_unit_key_states, dim=-1, keepdim=True)
-            restored_key_states[self.mask_k[layer_idx-1]] = self.retained_key_cache[layer_idx].view(-1, 128)
-
-            restored_value_states = previous_value_magnitude[0:1, :, :].unsqueeze(-1) * previous_unit_value_states / torch.norm(previous_unit_value_states, dim=-1, keepdim=True)
-            restored_value_states[self.mask_v[layer_idx-1]] = self.retained_value_cache[layer_idx].view(-1, 128)
-            return restored_key_states, restored_value_states
-        elif layer_idx % 2 == 0:
-            
-            unit_key_states = self.key_unit_cache[layer_idx]
-            unit_value_states = self.value_unit_cache[layer_idx]
-            key_magnitude = self.key_magnitude[layer_idx]
-            value_magnitude = self.value_magnitude[layer_idx]
-            # print('decode:', key_magnitude.shape,unit_key_states.shape)
-
-            restored_key_states = key_magnitude[1:2, :, :].unsqueeze(-1) * unit_key_states / torch.norm(unit_key_states, dim=-1, keepdim=True)
-  
-            restored_key_states[self.mask_k[layer_idx]] = self.retained_key_cache[layer_idx].view(-1, 128)
-
-            restored_value_states = value_magnitude[1:2, :, :].unsqueeze(-1) * unit_value_states / torch.norm(unit_value_states, dim=-1, keepdim=True)
-            restored_value_states[self.mask_v[layer_idx]] = self.retained_value_cache[layer_idx].view(-1, 128)
-            return restored_key_states, restored_value_states
+        return self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx]
+ 
+     
     @classmethod
     def from_legacy_cache(cls, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None) -> "MiniCache":
         """Converts a cache in the legacy cache format into an equivalent `MiniCache`. Used for
