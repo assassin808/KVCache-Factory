@@ -291,6 +291,111 @@ class DynamicCache(Cache):
         self.retained_value_cache.append(value_states)
         self.hidden_states.append(hidden_states)
 
+        if layer_idx == 31:
+            import torch
+            import torch.nn.functional as F
+            def calculate_interlayer_similarity(key_cache_list):
+                num_layers = len(key_cache_list)
+                similarity_matrix = torch.zeros((num_layers, num_layers))
+
+                for i in range(num_layers):
+                    for j in range(num_layers):
+                        # Get key caches for the current layer pair
+                        key_cache_i = key_cache_list[i][0]  # [batch_size, num_heads, sequence_length, head_dim]
+                        key_cache_j = key_cache_list[j][0]
+
+
+                        # Normalize the key vectors
+                        key_i_norm = key_cache_i.norm(dim=-1, keepdim=True)
+                        key_j_norm = key_cache_j.norm(dim=-1, keepdim=True)
+                        # key_i_norm=key_i_norm.squeeze(-1)
+                        # key_j_norm=key_j_norm.squeeze(-1)
+
+                       
+                        # Reshape for matrix multiplication: [batch_size * num_heads * sequence_length, head_dim]
+                        key_i_reshaped = key_cache_i / key_i_norm
+                        key_j_reshaped = key_cache_j / key_j_norm
+                        # del key_i_norm, key_j_norm
+                        print(torch.mm(key_i_reshaped, key_j_reshaped.T)[0][0])
+
+                        
+
+                        # import matplotlib.pyplot as plt
+                        # import numpy as np
+                        # fig, ax = plt.subplots(figsize=(10, 10))  # Adjust figure size as needed
+                        # heatmap = ax.imshow(torch.mm(key_i_reshaped, key_j_reshaped.T).cpu(), cmap='viridis', interpolation='nearest')
+
+                        # # Add a colorbar
+                        # cbar = plt.colorbar(heatmap)
+
+                        # # Set title and labels (optional)
+                        # plt.title("Similarity Matrix Heatmap")
+                        # plt.xlabel("X-axis Label")
+                        # plt.ylabel("Y-axis Label")
+
+                        # # Save the heatmap as a PNG image
+                        # plt.savefig("similarity_heatmap.png", dpi=300)  # Adjust dpi for desired resolution
+
+                       # print('key_j_reshaped',key_j_reshaped.shape)
+                        # Calculate cosine similarity
+                        similarity = torch.mm(key_i_reshaped, key_j_reshaped.T)  # [batch_size * num_heads * sequence_length, batch_size * num_heads * sequence_length]
+                        similarity = torch.trace(similarity) / similarity.shape[0]
+                        # del key_i_reshaped, key_j_reshaped
+                        # Average the similarity
+                        # Store in the matrix
+                        similarity_matrix[i, j] = similarity.item()
+                        
+
+                return similarity_matrix
+            def print_tensor_summary(name, tensor):
+                """Prints a summary of a tensor, including its shape, type, min, max, mean, and a formatted portion of the data.
+
+                Args:
+                    name: The name of the tensor (e.g., 'key' or 'value').
+                    tensor: The tensor to print.
+                """
+
+                print(f"--- {name.upper()} TENSOR SUMMARY ---")
+                print(f"  Shape: {tensor.shape}")
+                print(f"  Data Type: {tensor.dtype}")
+                print(f"  Min: {tensor.min().item():.4f}")
+                print(f"  Max: {tensor.max().item():.4f}")
+                print(f"  Mean: {tensor.mean().item():.4f}")
+                print(f"  Standard Deviation: {tensor.std().item():.4f}")
+
+                # Format a portion of the tensor for printing
+                if tensor.ndim > 2:
+                    # For higher-dimensional tensors, print a slice
+                    print("  Data (first slice):")
+                    for i in range(min(tensor.shape[0], 3)): # Print up to the first 3 slices/batches
+                        print(tensor[i,:,:4,:4])  #Print the top left corner
+                elif tensor.ndim == 2:
+                    print("  Data (first few rows and columns):")
+                    print(tensor[:8, :8])  # Print a small section
+                else:
+                    print("  Data (first few elements):")
+                    print(tensor[:10])
+
+                print("-" * 30 + "\n")
+
+                # Assuming you have your calculate_interlayer_similarity function and the retained caches:
+                # Example:
+                # def calculate_interlayer_similarity(cache):
+                #   # ... your similarity calculation ...
+                #   return similarity_tensor
+
+                # Example retained caches (replace with your actual data):
+                # self.retained_key_cache = torch.randn(1, 32, 50, 128)
+                # self.retained_value_cache = torch.randn(1, 32, 50, 128)
+
+            #     # Now print the summaries:
+            import numpy as np
+            print_tensor_summary('key', calculate_interlayer_similarity(self.retained_key_cache))
+            print_tensor_summary('value', calculate_interlayer_similarity(self.retained_value_cache))
+            similarity_matrix_np = calculate_interlayer_similarity(self.retained_key_cache).cpu().numpy()
+            np.savetxt("similarity_matrix.csv", similarity_matrix_np, delimiter=",")
+            exit(0)
+
         return self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx]
     def update_miniCache(
             self,
@@ -316,88 +421,7 @@ class DynamicCache(Cache):
         # except Exception as e:
         #     print('prefill:',layer_idx, None,len(self.key_unit_cache))
 
-        # if layer_idx == num_layers - 1:
-            # import torch
-            # import torch.nn.functional as F
-            # def calculate_interlayer_similarity(key_cache_list):
-            #     num_layers = len(key_cache_list)
-            #     similarity_matrix = torch.zeros((num_layers, num_layers))
-
-            #     for i in range(num_layers):
-            #         for j in range(num_layers):
-            #             # Get key caches for the current layer pair
-            #             key_cache_i = key_cache_list[i]  # [batch_size, num_heads, sequence_length, head_dim]
-            #             key_cache_j = key_cache_list[j]
-
-
-            #             # Normalize the key vectors
-            #             key_i_norm = F.normalize(key_cache_i, dim=2)
-            #             key_j_norm = F.normalize(key_cache_j, dim=2)
-
-                       
-            #             # Reshape for matrix multiplication: [batch_size * num_heads * sequence_length, head_dim]
-            #             key_i_reshaped = key_i_norm.reshape(1, -1)
-            #             key_j_reshaped = key_j_norm.reshape(1, -1)
-            #             del key_i_norm, key_j_norm
-                       
-
-            #             # Calculate cosine similarity
-            #             similarity = F.cosine_similarity(key_i_reshaped, key_j_reshaped, dim=1)  # [batch_size * num_heads * sequence_length, batch_size * num_heads * sequence_length]
-            #             del key_i_reshaped, key_j_reshaped
-            #             # Average the similarity
-            #             # Store in the matrix
-            #             similarity_matrix[i, j] = similarity.item()
-                        
-
-            #     return similarity_matrix
-            # def print_tensor_summary(name, tensor):
-            #     """Prints a summary of a tensor, including its shape, type, min, max, mean, and a formatted portion of the data.
-
-            #     Args:
-            #         name: The name of the tensor (e.g., 'key' or 'value').
-            #         tensor: The tensor to print.
-            #     """
-
-            #     print(f"--- {name.upper()} TENSOR SUMMARY ---")
-            #     print(f"  Shape: {tensor.shape}")
-            #     print(f"  Data Type: {tensor.dtype}")
-            #     print(f"  Min: {tensor.min().item():.4f}")
-            #     print(f"  Max: {tensor.max().item():.4f}")
-            #     print(f"  Mean: {tensor.mean().item():.4f}")
-            #     print(f"  Standard Deviation: {tensor.std().item():.4f}")
-
-            #     # Format a portion of the tensor for printing
-            #     if tensor.ndim > 2:
-            #         # For higher-dimensional tensors, print a slice
-            #         print("  Data (first slice):")
-            #         for i in range(min(tensor.shape[0], 3)): # Print up to the first 3 slices/batches
-            #             print(tensor[i,:,:4,:4])  #Print the top left corner
-            #     elif tensor.ndim == 2:
-            #         print("  Data (first few rows and columns):")
-            #         print(tensor[:8, :8])  # Print a small section
-            #     else:
-            #         print("  Data (first few elements):")
-            #         print(tensor[:10])
-
-            #     print("-" * 30 + "\n")
-
-            #     # Assuming you have your calculate_interlayer_similarity function and the retained caches:
-            #     # Example:
-            #     # def calculate_interlayer_similarity(cache):
-            #     #   # ... your similarity calculation ...
-            #     #   return similarity_tensor
-
-            #     # Example retained caches (replace with your actual data):
-            #     # self.retained_key_cache = torch.randn(1, 32, 50, 128)
-            #     # self.retained_value_cache = torch.randn(1, 32, 50, 128)
-
-            #     # Now print the summaries:
-            # # import numpy as np
-            # # print_tensor_summary('key', calculate_interlayer_similarity(self.retained_key_cache))
-            # # print_tensor_summary('value', calculate_interlayer_similarity(self.retained_value_cache))
-            # # similarity_matrix_np = calculate_interlayer_similarity(self.retained_key_cache).cpu().numpy()
-            # np.savetxt("similarity_matrix.csv", similarity_matrix_np, delimiter=",")
-            # exit(0)
+        
 
 
         if layer_idx < num_layers//4:

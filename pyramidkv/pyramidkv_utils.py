@@ -537,7 +537,8 @@ class MiniCacheKVCluster:
         else:
             bsz, num_heads, seq_len, head_dim = key_states.shape
             N = seq_len #* num_heads
-            n = int(4 * N * (1 - self.compression_ratio))
+            n = int(4 * N * (1 - self.compression_ratio)) * 0
+            n=1
             if layer_idx == self.num_layers - 1:
                 n = 0
 
@@ -604,7 +605,7 @@ class MiniCacheKVCluster:
                 unselected_v = value_states.masked_select(mask_v.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
                 unselected_km1 = previous_key_states.masked_select(mask_k.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
                 unselected_vm1 = previous_value_states.masked_select(mask_v.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
-                # print('cluster',layer_idx,unselected_k.shape)
+                print('cluster',layer_idx,unselected_k.shape)
 
                 mag_k_cat = torch.cat((mag_k, mag_km1), dim=0)
                 mag_v_cat = torch.cat((mag_v, mag_vm1), dim=0)
