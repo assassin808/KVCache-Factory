@@ -513,22 +513,95 @@ class CAMKVCluster:
             return key_states, value_states
 
 class MiniCacheKVCluster:
-    def __init__(self, compression_ratio, num_layers):
+    def __init__(self, compression_ratio, num_layers, window_size = 64, max_capacity_prompt = 256 + 64, kernel_size = 5, pooling = 'avgpool', merge = None):
         self.compression_ratio = compression_ratio
         self.num_layers = num_layers
 
-    def reset(self, compression_ratio, num_layers):
+        self.window_size = window_size
+        self.max_capacity_prompt = max_capacity_prompt
+        assert self.max_capacity_prompt - self.window_size > 0
+        self.kernel_size = kernel_size
+        self.pooling = pooling
+        self.merge = merge
+
+    def reset(self, compression_ratio, num_layers, window_size = 64, max_capacity_prompt = 256 + 64, kernel_size = 5, pooling = 'avgpool', merge = None):
         self.compression_ratio = compression_ratio
         self.num_layers = num_layers
 
-
-    def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups, layer_idx, previous_key_states, previous_value_states, hidden_states, previous_hidden_states):
+        self.window_size = window_size
+        self.max_capacity_prompt = max_capacity_prompt
+        assert self.max_capacity_prompt - self.window_size > 0
+        self.kernel_size = kernel_size
+        self.pooling = pooling
+        self.merge = merge
+    def update_kv_h2o(self, hidden_states, key_states, query_states, value_states, attention_mask, num_key_value_groups):
         
         # check if prefix phase
         assert key_states.shape[-2] == query_states.shape[-2]
         bsz, num_heads, q_len, head_dim = query_states.shape
+        _, _, hidden_dim = hidden_states.shape # bsz, q_len, hidden_dim
+
+        # print(f"minicache H2O max_capacity_prompt {self.max_capacity_prompt}")
         
-        print(f"miniCache compression_ratio {self.compression_ratio}")
+        if q_len < self.max_capacity_prompt:
+            return hidden_states, key_states, value_states
+        else:
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim)
+            mask = torch.full((self.window_size, self.window_size), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
+            mask_cond = torch.arange(mask.size(-1), device=attn_weights.device)
+            mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
+            mask = mask.to(attn_weights.device)
+            attention_mask = mask[None, None, :, :]
+
+            attn_weights[:, :, -self.window_size:, -self.window_size:] += attention_mask
+
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights_sum = attn_weights[:, :, :, : -self.window_size].sum(dim = -2)
+            # if self.pooling == 'avgpool':
+            #     attn_cache = F.avg_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+            # elif self.pooling == 'maxpool':
+            #     attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+            # else:
+            #     raise ValueError('Pooling method not supported')
+            attn_cache = attn_weights_sum
+
+            # Correctly compute indices for hidden_states and key/value states
+            indices = attn_cache.topk(self.max_capacity_prompt - self.window_size, dim=-1).indices
+            
+            # Expand indices for hidden_states
+            #   hidden_states: [bsz, seq_len, hidden_dim]
+            #   indices: [bsz, num_heads, reduced_seq_len]
+            #   We need to consider that hidden_states doesn't have a num_heads dimension.
+          
+            indices_hidden = torch.max(indices, dim=1)[0].unsqueeze(-1).expand(-1, -1, hidden_dim) # shape (bsz, reduced_seq_len, hidden_dim)
+
+            # Expand indices for key_states and value_states
+            indices_kv = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
+
+            if self.merge is not None:
+                hidden_states, key_states, value_states = merge_hkv(hidden_states, key_states, value_states, indices, indices_hidden, self.window_size, self.merge)
+                return hidden_states, key_states, value_states
+
+            # Apply eviction to hidden_states
+            # hidden_states shape: [bsz, seq_len, hidden_dim]
+            # We need to gather along the sequence length dimension (dim=1)
+            h_past_compress = hidden_states[:, :-self.window_size, :].gather(dim=1, index=indices_hidden) # Corrected dimension
+            h_cur = hidden_states[:, -self.window_size:, :]
+            hidden_states = torch.cat([h_past_compress, h_cur], dim=1) # Concatenate along the sequence length dimension
+            
+            # Apply eviction to key_states and value_states
+            k_past_compress = key_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices_kv)
+            v_past_compress = value_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices_kv)
+            k_cur = key_states[:, :, -self.window_size:, :]
+            v_cur = value_states[:, :, -self.window_size:, :]
+            key_states = torch.cat([k_past_compress, k_cur], dim = 2)
+            value_states = torch.cat([v_past_compress, v_cur], dim = 2)
+
+            return hidden_states, key_states, value_states
+
+    def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups, layer_idx, previous_key_states, previous_value_states, hidden_states, previous_hidden_states):
+
+        # print(f"miniCache compression_ratio {self.compression_ratio}")
 
         if layer_idx < self.num_layers//4:
             return key_states, value_states, None, None, None, None, None, None, previous_key_states, previous_value_states
@@ -559,6 +632,10 @@ class MiniCacheKVCluster:
 
                 k_similarity = torch.einsum("bhsd,bhsd->bhs", e_k_l, e_k_lm1)
                 v_similarity = torch.einsum("bhsd,bhsd->bhs", e_v_l, e_v_lm1)
+                print('k_sim', torch.mean(k_similarity))
+                print('v_sim', torch.mean(v_similarity))
+
+
                 angle_k = torch.acos(k_similarity).unsqueeze(-1)
                 angle_v = torch.acos(v_similarity).unsqueeze(-1)
 
@@ -574,7 +651,7 @@ class MiniCacheKVCluster:
                 # so if the hidden state of a token is high, we selected the key cache and value cache of that token for all heads
 
                 hidden_similarity = hidden_similarity.unsqueeze(1).repeat(1, 32, 1)
-                print(hidden_similarity.shape)
+                # print(hidden_similarity.shape)
 
 
 
@@ -1091,6 +1168,11 @@ def init_MiniCacheKV(self, num_hidden_layers):
     self.kv_cluster = MiniCacheKVCluster(
          compression_ratio=0.9,
          num_layers = num_hidden_layers,
+         window_size = self.config.window_size, 
+        max_capacity_prompt = self.config.max_capacity_prompt, 
+        kernel_size = self.config.kernel_size,
+        pooling = self.config.pooling,
+        merge = self.config.merge,
         )
 
 def init_CAM(self):
