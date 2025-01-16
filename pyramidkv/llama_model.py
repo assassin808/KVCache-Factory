@@ -666,6 +666,10 @@ def llama_attn_forward_MiniCache(
             # print_tensor_summary('value', calculate_interlayer_similarity(self.retained_value_cache))
             similarity_matrix_np = calculate_interlayer_similarity(past_key_value.attn_output).cpu().numpy()
             np.savetxt("similarity_matrix.csv", similarity_matrix_np, delimiter=",")
+            import matplotlib.pyplot as plt
+            # heat map for similarity matrix and store as png
+            plt.imshow(similarity_matrix_np, cmap='hot', interpolation='nearest')
+            plt.savefig('similarity_matrix.png')
             exit(0)
     return attn_output, attn_weights, past_key_value
 
