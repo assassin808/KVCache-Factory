@@ -552,6 +552,10 @@ def llama_attn_forward_MiniCache(
 
     attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
+    # if key_states.shape[-2] == kv_seq_len:
+        # past_key_value.store_attn_output(attn_weights.mean(dim=-1))
+    
+
     if attention_mask is not None:  # no matter the length, we just slice it
         causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
         attn_weights = attn_weights + causal_mask
@@ -560,6 +564,13 @@ def llama_attn_forward_MiniCache(
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
     attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
     attn_output = torch.matmul(attn_weights, value_states)
+
+    if key_states.shape[-2] == kv_seq_len:
+        past_key_value.store_attn_output(attn_output)
+    
+
+
+    
 
 
     del key_states, value_states
@@ -583,6 +594,7 @@ def llama_attn_forward_MiniCache(
 
     if not output_attentions:
         attn_weights = None
+    
 
     return attn_output, attn_weights, past_key_value
 

@@ -232,6 +232,7 @@ class DynamicCache(Cache):
       self.mask_v = []
 
       self.hidden_states = []
+      self.attn_output = []
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
         """
@@ -257,6 +258,8 @@ class DynamicCache(Cache):
         to the number of layers in the model.
         """
         return len(self.retained_key_cache)
+    def store_attn_output(self,attn_output):
+        self.attn_output.append(attn_output)
     def update(
         self,
         key_states: torch.Tensor,
@@ -293,19 +296,6 @@ class DynamicCache(Cache):
         self.retained_value_cache.append(value_states)
         self.hidden_states.append(hidden_states)
 
-        layer_map = []
-
-        if layer_idx == 31:
-            for i in range(32):
-                for j in range(32):
-                    if i>=j:
-                        continue
-                    k_prev = self.retained_key_cache[i]
-                    k = self.retained_key_cache[j]
-                    k_similarity = torch.einsum("bhsd,bhsd->bhs", k_prev, k).mean().item()
-                    layer_map.append((i,j, k_similarity))
-        layer_map.sort(key=lambda x:x[-1])
-
         self.key_unit_cache.append(None)
         self.value_unit_cache.append(None)
         self.key_magnitude.append(None)
@@ -313,16 +303,70 @@ class DynamicCache(Cache):
         self.mask_k.append(None)
         self.mask_v.append(None)
 
+        layer_map = []
+
+        if layer_idx == 31:
+            for i in range(31):
+                for j in range(31):
+                    if i>=j:
+                        continue
+                    k_prev = self.retained_key_cache[i]
+                    k = self.retained_key_cache[j]
+                    # k_prev = k_prev.mean(dim = 1).mean(dim = 1)
+                    # k = k.mean(dim = 1).mean(dim = 1)
+
+                    # v_prev = self.retained_value_cache[i]
+                    # v = self.retained_value_cache[j]
+                    k_similarity = torch.einsum("bhsd,bhsd->bhs", self.attn_output[i]/self.attn_output[i].norm(dim=-1, keepdim=True), self.attn_output[j]/self.attn_output[i].norm(dim=-1, keepdim=True)).mean().item()
+                    # attn_similarity = (torch.mean((self.attn_output[i] - self.attn_output[j])**2)).item()
+
+                    # k_similarity = torch.norm(k_prev-k,p=2,dim=-1).mean().item()
+                    # v_similarity = torch.norm(v_prev-v,p=2,dim=-1).mean().item()
+
+                    # squared_diff = (k - k_prev) ** 2
+                    # k_similarity = -torch.mean(squared_diff).item()
+                    # k_prev /=k_prev.norm(dim=-1, keepdim=True)
+                    # k /=k.norm(dim=-1, keepdim=True)
+                    # k_similarity = torch.einsum("bhsd,bhsd->bhs", k_prev, k).mean().item()
+                    layer_map.append((i,j, k_similarity))
+            layer_map.sort(key=lambda x:-abs(x[-1]))
+            temp_key = self.retained_key_cache.copy()
+            temp_value = self.retained_value_cache.copy()
+
+            replaced_layer = set()
+            used_layer = set()
+            for item in layer_map:
+                if len(replaced_layer) > 8:
+                    break
+                if item[1] in replaced_layer or item[1] in used_layer:# or item[0] ==31 or  item[1] ==31:
+                    continue
+                replaced_layer.add(item[1])
+                used_layer.add(item[0])
+                # print('shape', self.attn_output[item[0]].shape)
+                # attn_similarity = (torch.mean((self.attn_output[item[0]] - self.attn_output[item[1]])**2)).item()
+                # hidden_similarity = torch.einsum("bsd,bsd->bs", self.hidden_states[item[0]]/self.hidden_states[item[0]].norm(dim=-1, keepdim=True), self.hidden_states[item[1]] / self.hidden_states[item[1]].norm(dim=-1, keepdim=True)).mean().item()
+                # print(item, 'attn:',attn_similarity)
+                # print(item)
+                # with open('usaed_layer','a') as f:
+                #     f.write(str(item[0]))
+                #     f.write('\n')
+                # with open('replaced_layer','a') as f:
+                #     f.write(str(item[1]))
+                #     f.write('\n')
+            
+
+
+                self.retained_key_cache[item[1]] = temp_key[item[0]]
+                self.retained_value_cache[item[1]] = temp_value[item[0]]
+
+            del temp_key, temp_value
+
+        
+
 
         ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx])
 
-        temp_key = self.retained_key_cache.copy()
-        temp_value = self.retained_value_cache.copy()
-        for item in layer_map[:8]:
-            self.retained_key_cache[item[1]] = temp_key[item[0]]
-            self.retained_value_cache[item[1]] = temp_value[item[0]]
-
-        del temp_key
+        
         return ret_value[0], ret_value[1], ret_value[2]
     def update_miniCache(
             self,
