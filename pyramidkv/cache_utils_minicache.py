@@ -232,6 +232,7 @@ class DynamicCache(Cache):
       self.mask_v = []
 
       self.hidden_states = []
+      self.attn_output = []
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
         """
@@ -257,6 +258,8 @@ class DynamicCache(Cache):
         to the number of layers in the model.
         """
         return len(self.retained_key_cache)
+    def store_attn_output(self, attn_output):
+        self.attn_output.append(attn_output)
     def update(
         self,
         key_states: torch.Tensor,

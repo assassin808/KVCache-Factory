@@ -583,7 +583,8 @@ def llama_attn_forward_MiniCache(
 
     if not output_attentions:
         attn_weights = None
-
+    if key_states.shape[-2] == kv_seq_len:
+        past_key_value.store_attn_output(attn_output)
     return attn_output, attn_weights, past_key_value
 
 
