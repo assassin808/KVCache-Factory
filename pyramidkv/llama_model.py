@@ -534,7 +534,7 @@ def llama_attn_forward_MiniCache(
 
         if key_states.shape[-2] == kv_seq_len:
             self.kv_seq_len = kv_seq_len
-            key_states, value_states, hidden_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states, hidden_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs, hidden_states)
 
             if self.layer_idx == 0:
                 previous_key_states, previous_value_states, previous_hidden_states = None, None, None
@@ -562,7 +562,7 @@ def llama_attn_forward_MiniCache(
     attn_output = torch.matmul(attn_weights, value_states)
 
 
-    del key_states, value_states
+    # del key_states, value_states
 
     if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
         raise ValueError(
@@ -587,7 +587,6 @@ def llama_attn_forward_MiniCache(
         past_key_value.store_attn_output(attn_output)
         if self.layer_idx == 31:
             # get attn_out_put similarity
-            import torch
             import torch.nn.functional as F
             def calculate_interlayer_similarity(key_cache_list):
                 num_layers = len(key_cache_list)
@@ -663,9 +662,9 @@ def llama_attn_forward_MiniCache(
 
                 # Now print the summaries:
             import numpy as np
-            print_tensor_summary('key', calculate_interlayer_similarity(self.attn_output))
+            print_tensor_summary('key', calculate_interlayer_similarity(past_key_value.attn_output))
             # print_tensor_summary('value', calculate_interlayer_similarity(self.retained_value_cache))
-            similarity_matrix_np = calculate_interlayer_similarity(self.attn_output).cpu().numpy()
+            similarity_matrix_np = calculate_interlayer_similarity(past_key_value.attn_output).cpu().numpy()
             np.savetxt("similarity_matrix.csv", similarity_matrix_np, delimiter=",")
             exit(0)
     return attn_output, attn_weights, past_key_value
