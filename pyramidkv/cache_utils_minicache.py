@@ -269,6 +269,7 @@ class DynamicCache(Cache):
         layer_idx: int,
         cache_kwargs: Optional[Dict[str, Any]] = None,
         hidden_states: torch.Tensor = None, 
+        attention_mask: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
@@ -332,7 +333,6 @@ class DynamicCache(Cache):
                     # k_similarity = torch.einsum("bhsd,bhsd->bhs", k_prev, k).mean().item()
                     layer_map.append((i,j, k_similarity))
             layer_map.sort(key=lambda x:-x[-1])
-
             replaced_layer = set()
             used_layer = set()
             for item in layer_map:
@@ -342,22 +342,50 @@ class DynamicCache(Cache):
                     continue
                 replaced_layer.add(item[1])
                 used_layer.add(item[0])
-                # print('shape', self.attn_output[item[0]].shape)
-                # attn_similarity = (torch.mean((self.attn_output[item[0]] - self.attn_output[item[1]])**2)).item()
-                # hidden_similarity = torch.einsum("bsd,bsd->bs", self.hidden_states[item[0]]/self.hidden_states[item[0]].norm(dim=-1, keepdim=True), self.hidden_states[item[1]] / self.hidden_states[item[1]].norm(dim=-1, keepdim=True)).mean().item()
-                # print(item, 'attn:',attn_similarity)
-                # print(item)
+
+                attn_weights = torch.matmul(self.query_states[item[1]], self.retained_key_cache[item[1]].transpose(2, 3)) / (self.retained_key_cache[item[1]].shape[-1] ** 0.5)
+
+                causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+                attn_weights = attn_weights + causal_mask
+
+                attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1)
+                attn_weights_flat = attn_weights.sum(dim=-1)
+                k = attn_weights_flat.shape[-1] // 2
+                thresholds, _ = torch.kthvalue(attn_weights_flat, k, dim=-1)
+                low_attention_mask = attn_weights_flat[item[1]] < thresholds.unsqueeze(-1)
+
+                delta_V1 = torch.matmul(attn_weights, self.retained_value_cache[item[1]])[low_attention_mask]
+                delta_V2 = torch.matmul(attn_weights, self.retained_value_cache[item[1]] - self.retained_value_cache[item[0]])[low_attention_mask]
+
+                evict_mask = torch.norm(delta_V1, dim=-1) < torch.norm(delta_V2, dim=-1)
+                replace_mask = ~evict_mask
+
+                combined_evict_mask = torch.zeros_like(attn_weights_flat, dtype=torch.bool)
+                combined_evict_mask[low_attention_mask] = evict_mask
+
+                combined_replace_mask = torch.zeros_like(attn_weights_flat, dtype=torch.bool)
+                combined_replace_mask[low_attention_mask] = replace_mask
+
+                num_evicted = evict_mask.sum().item()  # Number of tokens to evict
+                num_replaced = replace_mask.sum().item()  # Number of tokens to replace
+
+                print(f"Number of tokens evicted: {num_evicted}")
+                print(f"Number of tokens replaced: {num_replaced}")
+
+                print(item)
                 # with open('usaed_layer','a') as f:
                 #     f.write(str(item[0]))
                 #     f.write('\n')
                 # with open('replaced_layer','a') as f:
                 #     f.write(str(item[1]))
                 #     f.write('\n')
-            
 
-
-                self.retained_key_cache[item[1]] = temp_key[item[0]]
-                self.retained_value_cache[item[1]] = temp_value[item[0]]
+                self.retained_key_cache[item[1]][combined_replace_mask] = self.retained_key_cache[item[0]][combined_replace_mask]
+                self.retained_value_cache[item[1]][combined_replace_mask] = self.retained_value_cache[item[0]][combined_replace_mask]
+                
+                #remove the token according to evict_mask not setting to 0 but shrink the tensor
+                self.retained_key_cache[item[1]] = self.retained_key_cache[item[1]][~combined_evict_mask]
+                self.retained_value_cache[item[1]] = self.retained_value_cache[item[1]][~combined_evict_mask]
 
 
         
