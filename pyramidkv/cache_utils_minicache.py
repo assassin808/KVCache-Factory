@@ -359,7 +359,6 @@ class DynamicCache(Cache):
                 self.retained_key_cache[item[1]] = temp_key[item[0]]
                 self.retained_value_cache[item[1]] = temp_value[item[0]]
 
-            del temp_key, temp_value
 
         
 

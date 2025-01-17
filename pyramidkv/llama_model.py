@@ -566,7 +566,7 @@ def llama_attn_forward_MiniCache(
     attn_output = torch.matmul(attn_weights, value_states)
 
     if key_states.shape[-2] == kv_seq_len:
-        past_key_value.store_attn_output(attn_output)
+        past_key_value.store_attn_output(attn_output,query)
     
 
 
