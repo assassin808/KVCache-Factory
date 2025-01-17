@@ -259,7 +259,7 @@ class DynamicCache(Cache):
         to the number of layers in the model.
         """
         return len(self.retained_key_cache)
-    def store_attn_output(self,attn_output, query)
+    def store_attn_output(self,attn_output, query):
         self.attn_output.append(attn_output)
         self.query_states.append(query)
     def update(
@@ -343,49 +343,60 @@ class DynamicCache(Cache):
                 replaced_layer.add(item[1])
                 used_layer.add(item[0])
 
+                # Step 1: Average attention weights over all heads
                 attn_weights = torch.matmul(self.query_states[item[1]], self.retained_key_cache[item[1]].transpose(2, 3)) / (self.retained_key_cache[item[1]].shape[-1] ** 0.5)
+                attn_weights = attn_weights.mean(dim=1)  # Average over heads, shape becomes [batch_size, seq_len, seq_len]
 
+                # Step 2: Apply causal mask
                 causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
                 attn_weights = attn_weights + causal_mask
 
+                # Step 3: Apply softmax
                 attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1)
-                attn_weights_flat = attn_weights.sum(dim=-1)
+
+                # Step 4: Flatten the attention weights and calculate thresholds
+                attn_weights_flat = attn_weights.sum(dim=-1)  # Shape: [batch_size, seq_len]
                 k = attn_weights_flat.shape[-1] // 2
                 thresholds, _ = torch.kthvalue(attn_weights_flat, k, dim=-1)
-                low_attention_mask = attn_weights_flat[item[1]] < thresholds.unsqueeze(-1)
+                low_attention_mask = attn_weights_flat < thresholds.unsqueeze(-1)  # Shape: [batch_size, seq_len]
 
-                delta_V1 = torch.matmul(attn_weights, self.retained_value_cache[item[1]])[low_attention_mask]
-                delta_V2 = torch.matmul(attn_weights, self.retained_value_cache[item[1]] - self.retained_value_cache[item[0]])[low_attention_mask]
+                # Step 5: Calculate delta_V1 and delta_V2
+        
+                delta_V1 = torch.matmul(attn_weights, self.retained_value_cache[item[1]])  # Shape: [batch_size, num_heads, seq_len, head_dim]
+                print(delta_V1.shape, low_attention_mask.shape,low_attention_mask.unsqueeze(1).shape)
+                delta_V1 = delta_V1[low_attention_mask.expand(-1, delta_V1.shape[1], -1)]  # Shape: [num_heads * low_attention_count, head_dim]
 
-                evict_mask = torch.norm(delta_V1, dim=-1) < torch.norm(delta_V2, dim=-1)
-                replace_mask = ~evict_mask
+                delta_V2 = torch.matmul(attn_weights, self.retained_value_cache[item[1]] - self.retained_value_cache[item[0]])  # Shape: [batch_size, num_heads, seq_len, head_dim]
+                delta_V2 = delta_V2[low_attention_mask.expand(-1, delta_V2.shape[1], -1)]  # Shape: [num_heads * low_attention_count, head_dim]
+                delta_V2
 
-                combined_evict_mask = torch.zeros_like(attn_weights_flat, dtype=torch.bool)
-                combined_evict_mask[low_attention_mask] = evict_mask
+                # Step 6: Determine evict and replace masks
+                evict_mask = torch.norm(delta_V1, dim=-1) < torch.norm(delta_V2, dim=-1)  # Shape: [num_heads * low_attention_count]
+                replace_mask = ~evict_mask  # Shape: [num_heads * low_attention_count]
+                print(evict_mask.shape)
+                # Step 7: Create combined masks
+                combined_evict_mask = torch.zeros_like(attn_weights_flat, dtype=torch.bool).expand(-1, self.retained_key_cache[item[1]].shape[1], -1)  # Shape: [batch_size, num_heads, seq_len]
+                combined_evict_mask[low_attention_mask.expand(-1, self.retained_key_cache[item[1]].shape[1], -1)] = evict_mask.view(-1, self.retained_key_cache[item[1]].shape[1], 1)
 
-                combined_replace_mask = torch.zeros_like(attn_weights_flat, dtype=torch.bool)
-                combined_replace_mask[low_attention_mask] = replace_mask
+                combined_replace_mask = torch.zeros_like(attn_weights_flat, dtype=torch.bool).expand(-1, self.retained_key_cache[item[1]].shape[1], -1)  # Shape: [batch_size, num_heads, seq_len]
+                combined_replace_mask[low_attention_mask.expand(-1, self.retained_key_cache[item[1]].shape[1], -1)] = replace_mask.view(-1, self.retained_key_cache[item[1]].shape[1], 1)
 
+                # Step 8: Count the number of tokens to evict and replace
                 num_evicted = evict_mask.sum().item()  # Number of tokens to evict
                 num_replaced = replace_mask.sum().item()  # Number of tokens to replace
 
                 print(f"Number of tokens evicted: {num_evicted}")
                 print(f"Number of tokens replaced: {num_replaced}")
 
-                print(item)
-                # with open('usaed_layer','a') as f:
-                #     f.write(str(item[0]))
-                #     f.write('\n')
-                # with open('replaced_layer','a') as f:
-                #     f.write(str(item[1]))
-                #     f.write('\n')
-
+                # Step 9: Apply the replace and evict masks
                 self.retained_key_cache[item[1]][combined_replace_mask] = self.retained_key_cache[item[0]][combined_replace_mask]
                 self.retained_value_cache[item[1]][combined_replace_mask] = self.retained_value_cache[item[0]][combined_replace_mask]
-                
-                #remove the token according to evict_mask not setting to 0 but shrink the tensor
+
+                # Step 10: Remove the tokens according to evict_mask
                 self.retained_key_cache[item[1]] = self.retained_key_cache[item[1]][~combined_evict_mask]
                 self.retained_value_cache[item[1]] = self.retained_value_cache[item[1]][~combined_evict_mask]
+
+                
 
 
         
