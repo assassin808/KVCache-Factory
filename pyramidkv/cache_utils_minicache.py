@@ -233,6 +233,7 @@ class DynamicCache(Cache):
 
       self.hidden_states = []
       self.attn_output = []
+      self.query_states = []
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
         """
@@ -258,8 +259,9 @@ class DynamicCache(Cache):
         to the number of layers in the model.
         """
         return len(self.retained_key_cache)
-    def store_attn_output(self,attn_output):
+    def store_attn_output(self,attn_output, query)
         self.attn_output.append(attn_output)
+        self.query_states.append(query)
     def update(
         self,
         key_states: torch.Tensor,
@@ -317,7 +319,7 @@ class DynamicCache(Cache):
 
                     # v_prev = self.retained_value_cache[i]
                     # v = self.retained_value_cache[j]
-                    k_similarity = torch.einsum("bhsd,bhsd->bhs", self.attn_output[i]/self.attn_output[i].norm(dim=-1, keepdim=True), self.attn_output[j]/self.attn_output[i].norm(dim=-1, keepdim=True)).mean().item()
+                    k_similarity = torch.einsum("bhsd,bhsd->bhs", self.attn_output[i]/self.attn_output[i].norm(dim=-1, keepdim=True), self.attn_output[j]/self.attn_output[j].norm(dim=-1, keepdim=True)).mean().item()
                     # attn_similarity = (torch.mean((self.attn_output[i] - self.attn_output[j])**2)).item()
 
                     # k_similarity = torch.norm(k_prev-k,p=2,dim=-1).mean().item()
@@ -329,16 +331,14 @@ class DynamicCache(Cache):
                     # k /=k.norm(dim=-1, keepdim=True)
                     # k_similarity = torch.einsum("bhsd,bhsd->bhs", k_prev, k).mean().item()
                     layer_map.append((i,j, k_similarity))
-            layer_map.sort(key=lambda x:-abs(x[-1]))
-            temp_key = self.retained_key_cache.copy()
-            temp_value = self.retained_value_cache.copy()
+            layer_map.sort(key=lambda x:-x[-1])
 
             replaced_layer = set()
             used_layer = set()
             for item in layer_map:
                 if len(replaced_layer) > 8:
                     break
-                if item[1] in replaced_layer or item[1] in used_layer:# or item[0] ==31 or  item[1] ==31:
+                if item[1] in replaced_layer or item[1] in used_layer or item[0] in replaced_layer:# or item[0] ==31 or  item[1] ==31:
                     continue
                 replaced_layer.add(item[1])
                 used_layer.add(item[0])
