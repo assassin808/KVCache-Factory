@@ -354,49 +354,65 @@ class DynamicCache(Cache):
                 # Step 3: Apply softmax
                 attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1)
 
-                # Step 4: Flatten the attention weights and calculate thresholds
-                attn_weights_flat = attn_weights.sum(dim=-1)  # Shape: [batch_size, seq_len]
-                k = attn_weights_flat.shape[-1] // 2
-                thresholds, _ = torch.kthvalue(attn_weights_flat, k, dim=-1)
-                low_attention_mask = attn_weights_flat < thresholds.unsqueeze(-1)  # Shape: [batch_size, seq_len]
+              
+                # Step 4: Create a mask for 50% low attention score tokens
+                attn_sum = attn_weights.sum(dim=-1)  # Sum across the last dimension (seq_len), shape: [batch_size, seq_len]
+                num_tokens_to_keep = attn_sum.shape[-1] // 2  # 50% of the sequence length
+                _, low_attn_indices = torch.topk(attn_sum, num_tokens_to_keep, largest=False, dim=-1)  # Get indices of the lowest 50%, shape: [batch_size, num_tokens_to_keep]
 
-                # Step 5: Calculate delta_V1 and delta_V2
-        
-                delta_V1 = torch.matmul(attn_weights, self.retained_value_cache[item[1]])  # Shape: [batch_size, num_heads, seq_len, head_dim]
-                print(delta_V1.shape, low_attention_mask.shape,low_attention_mask.unsqueeze(1).shape)
-                delta_V1 = delta_V1[low_attention_mask.expand(-1, delta_V1.shape[1], -1)]  # Shape: [num_heads * low_attention_count, head_dim]
+                low_attn_mask = torch.zeros_like(attn_sum, dtype=torch.bool)  # Initialize a mask, shape: [batch_size, seq_len]
+                low_attn_mask.scatter_(1, low_attn_indices, True)  # Set True for low attention indices, shape: [batch_size, seq_len]
+                # Step 5: Calculate delta_V1 and delta_V2 for low attention tokens
+                batch_size, num_heads, seq_len, hidden_dim = self.retained_value_cache[item[1]].shape
 
-                delta_V2 = torch.matmul(attn_weights, self.retained_value_cache[item[1]] - self.retained_value_cache[item[0]])  # Shape: [batch_size, num_heads, seq_len, head_dim]
-                delta_V2 = delta_V2[low_attention_mask.expand(-1, delta_V2.shape[1], -1)]  # Shape: [num_heads * low_attention_count, head_dim]
-                delta_V2
+                # Reshape value caches to [batch_size * num_heads * seq_len, hidden_dim] for easier indexing
+                retained_value_current = self.retained_value_cache[item[1]].view(-1, hidden_dim) 
+                retained_value_prev = self.retained_value_cache[item[0]].view(-1, hidden_dim)
+                # Expand attn_weights to match dimensions
+                attn_weights_expanded = attn_weights.unsqueeze(1).expand(-1, num_heads, -1, -1).reshape(batch_size*num_heads*seq_len,-1)
 
-                # Step 6: Determine evict and replace masks
-                evict_mask = torch.norm(delta_V1, dim=-1) < torch.norm(delta_V2, dim=-1)  # Shape: [num_heads * low_attention_count]
-                replace_mask = ~evict_mask  # Shape: [num_heads * low_attention_count]
-                print(evict_mask.shape)
-                # Step 7: Create combined masks
-                combined_evict_mask = torch.zeros_like(attn_weights_flat, dtype=torch.bool).expand(-1, self.retained_key_cache[item[1]].shape[1], -1)  # Shape: [batch_size, num_heads, seq_len]
-                combined_evict_mask[low_attention_mask.expand(-1, self.retained_key_cache[item[1]].shape[1], -1)] = evict_mask.view(-1, self.retained_key_cache[item[1]].shape[1], 1)
+                # Compute delta_V1 and delta_V2 using broadcasting
 
-                combined_replace_mask = torch.zeros_like(attn_weights_flat, dtype=torch.bool).expand(-1, self.retained_key_cache[item[1]].shape[1], -1)  # Shape: [batch_size, num_heads, seq_len]
-                combined_replace_mask[low_attention_mask.expand(-1, self.retained_key_cache[item[1]].shape[1], -1)] = replace_mask.view(-1, self.retained_key_cache[item[1]].shape[1], 1)
+                delta_V1 = torch.matmul(attn_weights_expanded, retained_value_current).view(batch_size,num_heads,seq_len,-1) # Shape: [batch_size, num_heads, seq_len, hidden_dim]
+                delta_V2 = torch.matmul(attn_weights_expanded, retained_value_current - retained_value_prev).view(batch_size,num_heads,seq_len,-1)  # Shape: [batch_size, num_heads, seq_len, hidden_dim]
 
-                # Step 8: Count the number of tokens to evict and replace
-                num_evicted = evict_mask.sum().item()  # Number of tokens to evict
-                num_replaced = replace_mask.sum().item()  # Number of tokens to replace
+                # Step 6: Determine eviction and replacement tokens based on delta norms
+                delta_V1_norm = delta_V1.norm(dim=-1)  # Shape: [batch_size, num_heads, seq_len]
+                delta_V2_norm = delta_V2.norm(dim=-1)  # Shape: [batch_size, num_heads, seq_len]
 
-                print(f"Number of tokens evicted: {num_evicted}")
-                print(f"Number of tokens replaced: {num_replaced}")
+                # since we want to apply this only on low attension tokens
+                delta_V1_norm_masked = delta_V1_norm.masked_fill(~low_attn_mask.unsqueeze(1), float('inf')) #Shape: [batch_size, num_heads, seq_len]
+                delta_V2_norm_masked = delta_V2_norm.masked_fill(~low_attn_mask.unsqueeze(1), float('inf')) #Shape: [batch_size, num_heads, seq_len]
+                # print(delta_V1_norm_masked,delta_V2_norm_masked)
+                # Create masks for eviction and replacement
+                eviction_mask = (delta_V1_norm_masked < delta_V2_norm_masked) & low_attn_mask.unsqueeze(1) # Shape: [batch_size, num_heads, seq_len]
+                replacement_mask = (delta_V2_norm_masked < delta_V1_norm_masked) & low_attn_mask.unsqueeze(1)  # Shape: [batch_size, num_heads, seq_len]
 
-                # Step 9: Apply the replace and evict masks
-                self.retained_key_cache[item[1]][combined_replace_mask] = self.retained_key_cache[item[0]][combined_replace_mask]
-                self.retained_value_cache[item[1]][combined_replace_mask] = self.retained_value_cache[item[0]][combined_replace_mask]
+                # Step 7: Replace tokens
+                # Replace both keys and values in the current layer with those from the previous layer
+                self.retained_key_cache[item[1]][replacement_mask] = self.retained_key_cache[item[0]][replacement_mask]  # Shape: [1, 32, n, 128] after replacement
+                self.retained_value_cache[item[1]][replacement_mask] = self.retained_value_cache[item[0]][replacement_mask]  # Shape: [1, 32, n, 128] after replacement
 
-                # Step 10: Remove the tokens according to evict_mask
-                self.retained_key_cache[item[1]] = self.retained_key_cache[item[1]][~combined_evict_mask]
-                self.retained_value_cache[item[1]] = self.retained_value_cache[item[1]][~combined_evict_mask]
+                # Step 8: Evict tokens
 
-                
+                # Get the indices of tokens to keep (not evict)
+                keep_mask = ~eviction_mask  # Shape: [batch_size, num_heads, seq_len]
+                keep_indices = keep_mask.nonzero(as_tuple=False) # Shape: [num_elements_to_keep, 3] (where 3 represents batch, head, seq_len indices)
+
+                # Filter key and value caches based on keep_indices
+                # Assuming you want to maintain the batch and head dimensions and only reduce seq_len:
+
+                # Initialize new key and value caches with appropriate size
+                new_key_cache = torch.zeros((batch_size, num_heads, keep_indices.shape[0], hidden_dim), device=self.retained_key_cache[item[1]].device)
+                new_value_cache = torch.zeros((batch_size, num_heads, keep_indices.shape[0], hidden_dim), device=self.retained_value_cache[item[1]].device)
+                # Gather the values to be kept
+                new_key_cache = self.retained_key_cache[item[1]][keep_mask]
+                new_value_cache = self.retained_value_cache[item[1]][keep_mask]
+
+                # Reshape to [batch_size, num_heads, num_kept_tokens, hidden_dim]
+
+                self.retained_key_cache[item[1]] = new_key_cache.view(batch_size, num_heads, -1, hidden_dim)  # Shape: [1, 32, m, 128] where m is the new sequence length
+                self.retained_value_cache[item[1]] = new_value_cache.view(batch_size, num_heads, -1, hidden_dim) # Shape: [1, 32, m, 128]
 
 
         
