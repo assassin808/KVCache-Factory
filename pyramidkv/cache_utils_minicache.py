@@ -378,6 +378,9 @@ class DynamicCache(Cache):
                 similarity_matrix = torch.matmul(self.hidden_size[item[1]]/self.hidden_size[item[1]].norm(dim=-1), (self.hidden_size[item[1]]/self.hidden_size[item[1]].norm(dim=-1)).transpose(-1, -2))
                 hidden_similarity_same = similarity_matrix.mean(dim=-1)
 
+                selected = hidden_similarity_cross > hidden_similarity_same
+                print('selected:', selected.sum().item())
+
 
 
 
