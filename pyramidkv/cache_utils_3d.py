@@ -251,7 +251,7 @@ class DynamicCache(Cache):
         Support for backwards-compatible `past_key_value` length, e.g. `len(past_key_value)`. This value corresponds
         to the number of layers in the model.
         """
-        return len(self.retained_key_cache)
+        return len(self.key_cache)
     def update(
         self,
         key_states: torch.Tensor,
@@ -294,7 +294,7 @@ class DynamicCache(Cache):
 
 
         
-        return self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx]
+        return self.key_cache[layer_idx], self.value_cache[layer_idx], self.hidden_states[layer_idx]
 
     @classmethod
     def from_legacy_cache(cls, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None) -> "MiniCache":

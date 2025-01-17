@@ -1265,7 +1265,7 @@ def llama_attn_forward_3D(
 
         if key_states.shape[-2] == kv_seq_len:
             self.kv_seq_len = kv_seq_len
-            key_states_compress, value_states_compress = self.kv_cluster.update_kv(key_states, query_states, value_states, attention_mask, self.num_key_value_groups, prev_key_states, prev_query_states, prev_value_states, hidden_states, prev_hidden_states)
+            key_states_compress, value_states_compress = self.kv_cluster.update_kv(key_states, query_states, value_states, attention_mask, self.num_key_value_groups, prev_key_states, prev_query_states, prev_value_states, hidden_states, prev_hidden_states, self.layer_idx)
             past_key_value.update(key_states_compress, value_states_compress, self.layer_idx, cache_kwargs, hidden_states)
         else:
             self.kv_seq_len += q_len
@@ -2990,7 +2990,7 @@ def adaptive_LlamaModel_forward(
         attentions=all_self_attns,
     )
 
-def 3D_model_forward(
+def _3D_model_forward(
     self,
     input_ids: torch.LongTensor = None,
     attention_mask: Optional[torch.Tensor] = None,

@@ -617,7 +617,7 @@ class MiniCacheKVCluster:
                 return None, None, None, None, None, None, None, None, None, None
 
 
-class 3DKVCluster():
+class _3DKVCluster():
     def __init__(self, window_size = 64, max_capacity_prompt = 256 + 64, kernel_size = 5, pooling = 'avgpool', merge = None):
         self.window_size = window_size
         self.max_capacity_prompt = max_capacity_prompt
@@ -634,7 +634,7 @@ class 3DKVCluster():
         self.pooling = pooling
         self.merge = merge
 
-    def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups, prev_key_states, prev_query_states, prev_value_states, hidden_states, prev_hidden_states):
+    def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups, prev_key_states, prev_query_states, prev_value_states, hidden_states, prev_hidden_states, layer_idx):
         
         # check if prefix phase
         assert key_states.shape[-2] == query_states.shape[-2]
@@ -645,37 +645,76 @@ class 3DKVCluster():
         if q_len < self.max_capacity_prompt:
             return key_states, value_states
         else:
-            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim)
-            mask = torch.full((self.window_size, self.window_size), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
-            mask_cond = torch.arange(mask.size(-1), device=attn_weights.device)
-            mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
-            mask = mask.to(attn_weights.device)
-            attention_mask = mask[None, None, :, :]
+            if layer_idx % 2 == 1:
+                attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim)
+                mask = torch.full((self.window_size, self.window_size), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
+                mask_cond = torch.arange(mask.size(-1), device=attn_weights.device)
+                mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
+                mask = mask.to(attn_weights.device)
+                attention_mask = mask[None, None, :, :]
 
-            attn_weights[:, :, -self.window_size:, -self.window_size:] += attention_mask
+                attn_weights[:, :, -self.window_size:, -self.window_size:] += attention_mask
 
-            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-            attn_weights_sum = attn_weights[:, :, :, : -self.window_size].sum(dim = -2)
-            # if self.pooling == 'avgpool':
-            #     attn_cache = F.avg_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
-            # elif self.pooling == 'maxpool':
-            #     attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
-            # else:
-            #     raise ValueError('Pooling method not supported')
-            attn_cache = attn_weights_sum
-            indices = attn_cache.topk(self.max_capacity_prompt - self.window_size, dim=-1).indices
-            indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
+                attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+                attn_weights_sum = attn_weights[:, :, :, : -self.window_size].sum(dim = -2)
 
-            if self.merge is not None:
-                key_states, value_states = merge_kv(key_states, value_states, indices, self.window_size, self.merge)
-                return key_states, value_states
+                attn_cache = attn_weights_sum
+                indices = attn_cache.topk(self.max_capacity_prompt - self.window_size, dim=-1).indices
+                indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
 
-            k_past_compress = key_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)
-            v_past_compress = value_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)
-            k_cur = key_states[:, :, -self.window_size:, :]
-            v_cur = value_states[:, :, -self.window_size:, :]
-            key_states = torch.cat([k_past_compress, k_cur], dim = 2)
-            value_states = torch.cat([v_past_compress, v_cur], dim = 2)
+                if self.merge is not None:
+                    key_states, value_states = merge_kv(key_states, value_states, indices, self.window_size, self.merge)
+                    return key_states, value_states
+
+                k_past_compress = key_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)
+                v_past_compress = value_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)
+                k_cur = key_states[:, :, -self.window_size:, :]
+                v_cur = value_states[:, :, -self.window_size:, :]
+            
+
+           
+                hidden_cur = hidden_states[:, :-self.window_size, :].gather(dim = 2, index = indices.min(dim=1)[0])
+                hidden_prev = prev_hidden_states[:, :-self.window_size, :].gather(dim = 2, index = indices.min(dim=1)[0]) 
+                hidden_similarity_cross = torch.einsum("bsd,bsd->bs", hidden_cur/hidden_cur.norm(dim=-1,keepdim=True),  hidden_prev/hidden_prev.norm(dim=-1,keepdim=True))
+
+                hidden_similarity_cross = torch.einsum("bsd,bsd->bs", hidden_cur/hidden_cur.norm(dim=-1,keepdim=True),  hidden_prev/hidden_prev.norm(dim=-1,keepdim=True))
+                similarity_matrix = torch.matmul( hidden_cur/ hidden_cur.norm(dim=-1,keepdim=True), (hidden_cur/ hidden_cur.norm(dim=-1,keepdim=True)).transpose(-1, -2))
+
+                # Compute the average similarity over the surrounding tokens
+                hidden_similarity_local = torch.zeros_like(similarity_matrix[:, :, 0])  # Initialize output tensor [B, L]
+                L=hidden_similarity_local.shape[-1]
+
+                for i in range(L):
+                    # Define the start and end of the window
+                    start = max(0, i - 1)
+                    end = min(L, i  + 1)  # +1 because slicing is exclusive
+
+                    # Compute the average similarity within the window
+                    hidden_similarity_local[:, i] = similarity_matrix[:, i, start:end].mean(dim=-1)
+
+                selected = hidden_similarity_cross < hidden_similarity_local
+                # print('selected:', item[0], item[1],selected.sum().item(), (~selected).sum().item())
+                # selected = selected.unsqueeze(0).expand(1,32,selected.shape[-1]).int()
+            
+                # indices = selected.topk(selected.sum()//2//32, dim=-1).indices
+                # indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
+
+                # k_past_compress = k_past_compress.gather(dim = 2, index = indices)
+                # v_past_compress = v_past_compress.gather(dim = 2, index = indices)
+
+                # 2. replace withe next layer
+
+                selected = selected.unsqueeze(0).expand(1,32,selected.shape[-1])
+                selected = selected.unsqueeze(-1).expand(1,32,selected.shape[-1],128)
+
+               
+
+                k_past_compress[selected] = prev_key_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)[selected]
+                v_past_compress[selected] = prev_value_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)[selected]
+
+
+                key_states = torch.cat([k_past_compress, k_cur], dim = 2)
+                value_states = torch.cat([v_past_compress, v_cur], dim = 2)
             return key_states, value_states
 
            
@@ -1189,7 +1228,7 @@ def init_3D(self):
         if not hasattr(self.config, 'merge'):
             self.config.merge = None
     
-    self.kv_cluster = 3DKVCluster(
+    self.kv_cluster = _3DKVCluster(
         window_size = self.config.window_size, 
         max_capacity_prompt = self.config.max_capacity_prompt, 
         kernel_size = self.config.kernel_size,
