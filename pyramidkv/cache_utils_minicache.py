@@ -367,62 +367,19 @@ class DynamicCache(Cache):
                 # ... (Your existing code up to the calculation of attn_weights) ...
                 batch_size, num_heads, seq_len, hidden_dim = self.retained_value_cache[item[1]].shape
 
-                num_tokens_to_keep = self.max_capacity_prompt - self.window_size
+                num_tokens_to_keep = 3950 - 2048
                 _, low_attn_indices = torch.topk(attn_sum, num_tokens_to_keep, largest=False, dim=-1)  # Get indices of the lowest 50%, shape: [batch_size, num_heads, num_tokens_to_keep]
+                indices = indices.unsqueeze(-1).expand(-1, -1, -1, 128)
 
-                # Step 5: Calculate delta_V1 and delta_V2 
-                delta_V1 = torch.matmul(attn_weights, self.retained_value_cache[item[1]])  # Shape: [batch_size, num_heads, seq_len, hidden_dim]
-                value_cache_prev_aligned = self.retained_value_cache[item[0]][:, :, -seq_len:, :]  # Shape: [batch_size, num_heads, seq_len, hidden_dim]
-                delta_V2 = torch.matmul(attn_weights, self.retained_value_cache[item[1]] - value_cache_prev_aligned)  # Shape: [batch_size, num_heads, seq_len, hidden_dim]
+                k_past_compress = self.retained_key_cache[item[1]][:, :, :-2048, :].gather(dim = 2, index = indices)
+                v_past_compress = self.retained_value_cache[item[1]][:, :, :-2048, :].gather(dim = 2, index = indices)
 
-                # Step 6: Determine eviction and replacement tokens based on delta norms
-                delta_V1_norm = delta_V1.norm(dim=-1)  # Shape: [batch_size, num_heads, seq_len]
-                delta_V2_norm = delta_V2.norm(dim=-1)  # Shape: [batch_size, num_heads, seq_len]
-
-                # Step 7: Create eviction and replacement indices *within the low attention tokens*
-                # We'll use gather to select delta norms only for the low attention tokens.
-
-                low_attn_delta_V1_norm = delta_V1_norm.gather(2, low_attn_indices)  # Shape: [batch_size, num_heads, num_tokens_to_keep]
-                low_attn_delta_V2_norm = delta_V2_norm.gather(2, low_attn_indices)  # Shape: [batch_size, num_heads, num_tokens_to_keep]
-
-                # Compare delta norms within the low attention tokens
-                eviction_mask_low_attn = low_attn_delta_V1_norm < low_attn_delta_V2_norm  # Shape: [batch_size, num_heads, num_tokens_to_keep]
-                replacement_mask_low_attn = low_attn_delta_V1_norm >= low_attn_delta_V2_norm  # Shape: [batch_size, num_heads, num_tokens_to_keep]
-
-                # Get the actual indices for eviction and replacement using low_attn_indices
-                eviction_indices = low_attn_indices.masked_select(eviction_mask_low_attn)  # Shape: [num_eviction_tokens]
-                replacement_indices = low_attn_indices.masked_select(replacement_mask_low_attn)  # Shape: [num_replacement_tokens]
-
-                # Print the number of evicted and replaced tokens
-                num_eviction_tokens = eviction_indices.numel()
-                num_replacement_tokens = replacement_indices.numel()
-                # with open("output.txt", "a") as f:
-                print(f"Number of evicted tokens: {num_eviction_tokens}")
-                print(f"Number of replaced tokens: {num_replacement_tokens}")
-
-                # Step 8: Replace tokens (using scatter)
-
-                # Gather replacement values from the previous layer
-
-                self.retained_value_cache[item[1]][:, :, replacement_indices, :] = self.retained_value_cache[item[0]][:, :, replacement_indices, :]
-                self.retained_key_cache[item[1]][:, :, replacement_indices, :] = self.retained_key_cache[item[0]][:, :, replacement_indices, :]
-
-                
-
-                # Step 9: Evict tokens 
-                # Get indices of tokens to keep (invert eviction mask within low_attn_indices)
-
-                mask = torch.ones(self.retained_value_cache[item[1]].shape[2], dtype=bool, device=self.retained_value_cache[item[1]].device)
-                mask[eviction_indices] = False 
-               
+                hidden_similarity_cross = torch.einsum("bsd,bsd->bs", self.hidden_size[item[1]]/self.hidden_size[item[1]].norm(dim=-1),  self.hidden_size[item[0]]/self.hidden_size[item[0]].norm(dim=-1))
+                similarity_matrix = torch.matmul(self.hidden_size[item[1]]/self.hidden_size[item[1]].norm(dim=-1), (self.hidden_size[item[1]]/self.hidden_size[item[1]].norm(dim=-1)).transpose(-1, -2))
+                hidden_similarity_same = similarity_matrix.mean(dim=-1)
 
 
 
-                # Gather the values of the tokens to keep
-                self.retained_value_cache[item[1]] = self.retained_value_cache[item[1]][:, :, mask, :]  # Shape: [batch_size, num_heads, num_keep_tokens, hidden_dim]
-                self.retained_key_cache[item[1]] = self.retained_key_cache[item[1]][:, :, mask, :]  # Shape: [batch_size, num_heads, num_keep_tokens, hidden_dim]
-
-                # print('shape_key', self.retained_key_cache[item[1]].shape)
 
         ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx])
 
