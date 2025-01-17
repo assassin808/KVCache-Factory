@@ -398,6 +398,7 @@ class DynamicCache(Cache):
                 # Gather replacement values from the previous layer
 
                 self.retained_value_cache[item[1]][:, :, replacement_indices, :] = self.retained_value_cache[item[0]][:, :, replacement_indices, :]
+                self.retained_key_cache[item[1]][:, :, replacement_indices, :] = self.retained_key_cache[item[0]][:, :, replacement_indices, :]
 
                 
 
@@ -405,15 +406,10 @@ class DynamicCache(Cache):
                 # Get indices of tokens to keep (invert eviction mask within low_attn_indices)
                 keep_mask_low_attn = ~eviction_mask_low_attn  # Shape: [batch_size, num_heads, num_tokens_to_keep]
                 keep_indices = low_attn_indices.masked_select(keep_mask_low_attn)  # Shape: [num_keep_tokens]
-                # Reshape keep_indices for gather
-                keep_indices = keep_indices.view(batch_size, num_heads, -1)
-                keep_indices_expanded = keep_indices.unsqueeze(-1).expand(-1, -1, -1, hidden_dim)
-                # Gather the tokens to keep from the current cache
-                new_key_cache = self.retained_key_cache[item[1]].gather(2, keep_indices_expanded)
-                new_value_cache = self.retained_value_cache[item[1]].gather(2, keep_indices_expanded)
-                # Update the caches
-                self.retained_key_cache[item[1]] = new_key_cache
-                self.retained_value_cache[item[1]] = new_value_cache
+
+                # Gather the values of the tokens to keep
+                self.retained_value_cache[item[1]] = self.retained_value_cache[item[1]][:, :, keep_indices, :]  # Shape: [batch_size, num_heads, num_keep_tokens, hidden_dim]
+                self.retained_key_cache[item[1]] = self.retained_key_cache[item[1]][:, :, keep_indices, :]  # Shape: [batch_size, num_heads, num_keep_tokens, hidden_dim]
 
         ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx])
 
