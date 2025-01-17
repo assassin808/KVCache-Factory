@@ -392,16 +392,14 @@ class DynamicCache(Cache):
                 print(f"Number of replaced tokens: {num_replacement_tokens}")
 
                 # Step 8: Replace tokens (using scatter)
-                # Reshape for scatter_
                 print('re',replacement_indices)
-                replacement_indices = replacement_indices.view(batch_size, num_heads, -1)
-                replacement_indices_expanded = replacement_indices.unsqueeze(-1).expand(-1, -1, -1, hidden_dim)
+
+
                 # Gather replacement values from the previous layer
-                replacement_key_values = self.retained_key_cache[item[0]][:, :, -seq_len:, :].gather(2, replacement_indices_expanded)
-                replacement_value_values = self.retained_value_cache[item[0]][:, :, -seq_len:, :].gather(2, replacement_indices_expanded)
-                # Scatter the replacement values into the current layer's cache at the appropriate indices
-                self.retained_key_cache[item[1]].scatter_(2, replacement_indices_expanded, replacement_key_values)
-                self.retained_value_cache[item[1]].scatter_(2, replacement_indices_expanded, replacement_value_values)
+
+                self.retained_value_cache[item[1]][:, :, replacement_indices, :] = self.retained_value_cache[item[0]][:, :, replacement_indices, :]
+
+                
 
                 # Step 9: Evict tokens 
                 # Get indices of tokens to keep (invert eviction mask within low_attn_indices)
