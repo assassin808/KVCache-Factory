@@ -84,9 +84,9 @@ def replace_llama(method, model_name=None):
         transformers.models.llama.modeling_llama.LlamaAttention.forward = llama_attn_forward_SnapKV_ThinK
     
     elif method == "minicache":
-        print("Using MiniCache!")
-        transformers.models.llama.modeling_llama.LlamaModel.forward = minicache_model_forward
-        transformers.models.llama.modeling_llama.LlamaAttention.forward = llama_attn_forward_MiniCache
+        print("Using MiniCache 3d!")
+        transformers.models.llama.modeling_llama.LlamaModel.forward = 3D_model_forward
+        transformers.models.llama.modeling_llama.LlamaAttention.forward = llama_attn_forward_3D
         # transformers.models.llama.modeling_llama.LlamaFlashAttention2.forward = llama_flash_attn2_forward_MiniCache
         # transformers.models.llama.modeling_llama.LlamaSdpaAttention.forward = llama_sdpa_attn_forward_MiniCache
 

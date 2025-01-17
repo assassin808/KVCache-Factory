@@ -220,20 +220,13 @@ class DynamicCache(Cache):
     def __init__(self, config: PretrainedConfig = None) -> None:
       super().__init__()
       self.config = config
-      self.retained_key_cache: List[torch.Tensor] = []
-      self.retained_value_cache: List[torch.Tensor] = []
-      self.key_unit_cache: List[torch.Tensor] = []
-      self.value_unit_cache: List[torch.Tensor] = []
-      self.key_magnitude: List[torch.Tensor] = []
-      self.value_magnitude: List[torch.Tensor] = []
-
+      self.key_cache: List[torch.Tensor] = []
+      self.value_cache: List[torch.Tensor] = []
       self._seen_tokens = 0  # Used in `generate` to keep tally of how many tokens the cache has seen
-      self.mask_k = []
-      self.mask_v = []
+
 
       self.hidden_states = []
-      self.attn_output = []
-      self.query_states = []
+
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
         """
@@ -259,9 +252,6 @@ class DynamicCache(Cache):
         to the number of layers in the model.
         """
         return len(self.retained_key_cache)
-    def store_attn_output(self,attn_output, query):
-        self.attn_output.append(attn_output)
-        self.query_states.append(query)
     def update(
         self,
         key_states: torch.Tensor,
@@ -269,7 +259,6 @@ class DynamicCache(Cache):
         layer_idx: int,
         cache_kwargs: Optional[Dict[str, Any]] = None,
         hidden_states: torch.Tensor = None, 
-        attention_mask: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
@@ -294,218 +283,19 @@ class DynamicCache(Cache):
             self._seen_tokens += key_states.shape[-2]
 
         # Update the cache
-        assert len(self.retained_key_cache) <= layer_idx
-        self.retained_key_cache.append(key_states)
-        self.retained_value_cache.append(value_states)
-        self.hidden_states.append(hidden_states)
+        if len(self.key_cache) <= layer_idx:
+            self.key_cache.append(key_states)
+            self.value_cache.append(value_states)
+            self.hidden_states.append(hidden_states)
+        else:
+            self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key_states], dim=-2)
+            self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_states], dim=-2)
+        
 
-        self.key_unit_cache.append(None)
-        self.value_unit_cache.append(None)
-        self.key_magnitude.append(None)
-        self.value_magnitude.append(None)
-        self.mask_k.append(None)
-        self.mask_v.append(None)
-
-        layer_map = []
-
-        if layer_idx == 31:
-            for i in range(31):
-                for j in range(31):
-                    if i>=j:
-                        continue
-                    # k_prev = self.retained_value_cache[i]
-                    # k = self.retained_value_cache[j]
-                    k_prev = self.hidden_states[i]
-                    k = self.hidden_states[j]
-                    # k_prev = k_prev.mean(dim = 1).mean(dim = 1)
-                    # k = k.mean(dim = 1).mean(dim = 1)
-
-                    # v_prev = self.retained_value_cache[i]
-                    # v = self.retained_value_cache[j]
-                    # k_similarity = torch.einsum("bhsd,bhsd->bhs", self.attn_output[i]/self.attn_output[i].norm(dim=-1, keepdim=True), self.attn_output[j]/self.attn_output[j].norm(dim=-1, keepdim=True)).mean().item()
-                    # k_similarity = torch.einsum("bhsd,bhsd->bhs", self.attn_output[i], self.attn_output[j]).mean().item()
-                    # attn_similarity = (torch.mean((self.attn_output[i] - self.attn_output[j])**2)).item()
-
-                    # k_similarity = torch.norm(k_prev-k,p=2,dim=-1).mean().item()
-                    # v_similarity = torch.norm(v_prev-v,p=2,dim=-1).mean().item()
-
-                    # squared_diff = (k - k_prev) ** 2
-                    # k_similarity = -torch.mean(squared_diff).item()
-                    # k_prev /=k_prev.norm(dim=-1, keepdim=True)
-                    # k /=k.norm(dim=-1, keepdim=True)
-                    # k_similarity = torch.einsum("bsd,bsd->bs", k_prev, k).mean().item()
-                    # import random
-                    layer_map.append((i,i+1, i ))#k_similarity* 0 + random.random()
-            layer_map.sort(key=lambda x:-x[-1])
-            replaced_layer = set()
-            used_layer = set()
-            for item in layer_map:
-                if len(replaced_layer) > 15:
-                    break
-                if item[1] in replaced_layer or item[1] in used_layer or item[0] in replaced_layer:# or item[0] ==31 or  item[1] ==31:
-                    continue
-                replaced_layer.add(item[1])
-                used_layer.add(item[0])
-
-                # Step 1: Average attention weights over all heads
-                attn_weights = torch.matmul(self.query_states[item[1]], self.retained_key_cache[item[1]].transpose(2, 3)) / (self.retained_key_cache[item[1]].shape[-1] ** 0.5)
-                # attn_weights = attn_weights.mean(dim=1)  # Average over heads, shape becomes [batch_size, seq_len, seq_len]
-
-                window_size = 8
-                # Step 2: Apply causal mask
-                mask = torch.full((window_size,window_size), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
-                mask_cond = torch.arange(mask.size(-1), device=attn_weights.device)
-                mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
-                mask = mask.to(attn_weights.device)
-                attention_mask = mask[None, None, :, :]
-                attn_weights[:, :, -window_size:, -window_size:] += attention_mask
-                import torch.nn as nn
-                attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(attn_weights.dtype)
-                attn_weights_sum = attn_weights[:, :, :, : -window_size].sum(dim = -2)
-
-                # Step 3: Apply softmax
-                attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1)
-
-                # ... (Your existing code up to the calculation of attn_weights) ...
-                batch_size, num_heads, seq_len, hidden_dim = self.retained_value_cache[item[1]].shape
-                
-
-                num_tokens_to_keep = 2048 - window_size
-                _, indices = torch.topk(attn_weights_sum, num_tokens_to_keep, largest=False, dim=-1)  # Get indices of the lowest 50%, shape: [batch_size, num_heads, num_tokens_to_keep]
-                indices = indices.unsqueeze(-1).expand(-1, -1, -1, 128)
-
-                k_past_compress = self.retained_key_cache[item[1]][:, :, :-window_size, :].gather(dim = 2, index = indices)
-                v_past_compress = self.retained_value_cache[item[1]][:, :, :-window_size, :].gather(dim = 2, index = indices)
-                k_cur = self.retained_key_cache[item[1]][:, :, -window_size:, :]
-                v_cur = self.retained_value_cache[item[1]][:, :, -window_size:, :]
-               
-
-
-
-
-                hidden_cur = self.hidden_states[item[1]][:, :-window_size, :].gather(dim = 2, index = indices.min(dim=1)[0])
-                hidden_prev = self.hidden_states[item[0]][:, :-window_size, :].gather(dim = 2, index = indices.min(dim=1)[0]) 
-
-                hidden_similarity_cross = torch.einsum("bsd,bsd->bs", hidden_cur/hidden_cur.norm(dim=-1,keepdim=True),  hidden_prev/hidden_prev.norm(dim=-1,keepdim=True))
-                similarity_matrix = torch.matmul( hidden_cur/ hidden_cur.norm(dim=-1,keepdim=True), (hidden_cur/ hidden_cur.norm(dim=-1,keepdim=True)).transpose(-1, -2))
-
-                # Compute the average similarity over the surrounding tokens
-                hidden_similarity_local = torch.zeros_like(similarity_matrix[:, :, 0])  # Initialize output tensor [B, L]
-                L=hidden_similarity_local.shape[-1]
-
-                for i in range(L):
-                    # Define the start and end of the window
-                    start = max(0, i - 1)
-                    end = min(L, i  + 1)  # +1 because slicing is exclusive
-
-                    # Compute the average similarity within the window
-                    hidden_similarity_local[:, i] = similarity_matrix[:, i, start:end].mean(dim=-1)
-
-                selected = hidden_similarity_cross > hidden_similarity_local
-                # print('selected:', item[0], item[1],selected.sum().item(), (~selected).sum().item())
-                selected = selected.unsqueeze(0).expand(1,32,selected.shape[-1])
-                selected = selected.unsqueeze(-1).expand_as(k_past_compress)
-                # 1. remove itme whose cross similarity is low
-                # k_past_compress = k_past_compress[~selected]
-                # v_past_compress = v_past_compress[~selected]
-                # 2. replace withe next layer
-                # k_past_compress[selected] = self.retained_key_cache[item[1]][:, :, :-window_size, :].gather(dim = 2, index = indices)[selected]
-                # v_past_compress[selected] = self.retained_value_cache[item[1]][:, :, :-window_size, :].gather(dim = 2, index = indices)[selected]
-
-
-                self.retained_key_cache[item[1]] = torch.cat([k_past_compress, k_cur], dim = 2)
-                self.retained_value_cache[item[1]] = torch.cat([v_past_compress, v_cur], dim = 2)
-
-
-                
-
-
-               
-
-
-
-
-        ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx])
 
         
-        return ret_value[0], ret_value[1], ret_value[2]
-    def update_miniCache(
-            self,
-            key_states: torch.Tensor,
-            value_states: torch.Tensor,
-            unit_key_states: torch.Tensor,
-            unit_value_states: torch.Tensor,
-            key_magnitude: torch.Tensor,
-            value_magnitude: torch.Tensor,
-            mask_k,
-            mask_v,
-            previous_key_states: torch.Tensor,
-            previous_value_states: torch.Tensor,
-            layer_idx: int,   
-            num_layers: int,   
-    ):
-        """
-        Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx` and the previous `key_states` and `value_states`.
-        """
+        return self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx]
 
-        if layer_idx < num_layers//4:
-            self.key_unit_cache.append(None)
-            self.value_unit_cache.append(None)
-            self.key_magnitude.append(None)
-            self.value_magnitude.append(None)
-            self.mask_k.append(None)
-            self.mask_v.append(None)
-            return None
-             
-        if layer_idx % 2 == 1:
-            # print('unit prefill:', layer_idx, unit_key_states)
-            self.key_unit_cache.append(unit_key_states)
-            self.value_unit_cache.append(unit_value_states)
-            self.key_magnitude.append(key_magnitude)
-            self.value_magnitude.append(value_magnitude)
-            self.mask_k.append(mask_k)
-            self.mask_v.append(mask_v)
-
-            self.key_unit_cache.append(None)
-            self.value_unit_cache.append(None)
-            self.key_magnitude.append(None)
-            self.value_magnitude.append(None)
-            self.mask_k.append(None)
-            self.mask_v.append(None)
-
-            self.retained_key_cache[layer_idx] = key_states
-            self.retained_value_cache[layer_idx] = value_states
-
-            self.retained_key_cache[layer_idx-1] = previous_key_states
-            self.retained_value_cache[layer_idx-1] = previous_value_states
-
-    def update_miniCache_decode(self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        layer_idx: int,
-        num_layers: int,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx` , also restore the kv cache for previous tokens.
-        """
-        # Update the number of seen tokens
-        if layer_idx == 0:
-            self._seen_tokens += key_states.shape[-2]
-
-        # Update the cache
-        assert len(self.retained_key_cache) > layer_idx
-
-
-       
-        self.retained_key_cache[layer_idx] = torch.cat([self.retained_key_cache[layer_idx], key_states], dim=-2)
-        self.retained_value_cache[layer_idx] = torch.cat([self.retained_value_cache[layer_idx], value_states], dim=-2)
-
-
-
-        return self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx]
- 
-     
     @classmethod
     def from_legacy_cache(cls, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None) -> "MiniCache":
         """Converts a cache in the legacy cache format into an equivalent `MiniCache`. Used for
@@ -513,22 +303,18 @@ class DynamicCache(Cache):
         cache = cls()
         if past_key_values is not None:
             for layer_idx in range(len(past_key_values)):
-                cache.retained_key_cache.append(past_key_values[layer_idx][0])
-                cache.retained_value_cache.append(past_key_values[layer_idx][1])
-                cache.key_unit_cache.append(past_key_values[layer_idx][2])
-                cache.value_unit_cache.append(past_key_values[layer_idx][3])
-                cache.key_magnitude.append(past_key_values[layer_idx][4])
-                cache.value_magnitude.append(past_key_values[layer_idx][5])
-                cache.mask_k.append(past_key_values[layer_idx][6])
-                cache.mask_v.append(past_key_values[layer_idx][7])
+                cache.key_cache.append(past_key_values[layer_idx][0])
+                cache.value_cache.append(past_key_values[layer_idx][1])
+                cache.hidden_states.append(past_key_values[layer_idx][2])
+
 
 
         return cache
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
         """Returns the sequence length of the cached states. A layer index can be optionally passed."""
-        if len(self.retained_key_cache) <= layer_idx:
+        if len(self.key_cache) <= layer_idx:
             return 0
-        return self.retained_key_cache[layer_idx].shape[-2] + self.retained_value_cache[layer_idx].shape[-2]
+        return self.key_cache[layer_idx].shape[-2] + self.value_cache[layer_idx].shape[-2]
     
     def get_max_length(self) -> Optional[int]:
         """Returns the maximum sequence length of the cached states. DynamicCache does not have a maximum length."""
@@ -539,7 +325,7 @@ class DynamicCache(Cache):
         backward compatibility."""
         legacy_cache = ()
         for layer_idx in range(len(self)):
-            legacy_cache += ((self.retained_key_cache[layer_idx],  self.retained_value_cache[layer_idx], self.key_unit_cache[layer_idx], self.value_unit_cache[layer_idx], self.key_magnitude[layer_idx], self.value_magnitude[layer_idx], self.mask_k[layer_idx], self.mask_v[layer_idx]),)
+            legacy_cache += ((self.key_cache[layer_idx],  self.value_cache[layer_idx], self.hidden_states[layer_idx]),)
         return legacy_cache
 
     def crop(self, max_length: int):
