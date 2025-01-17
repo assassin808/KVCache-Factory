@@ -354,69 +354,68 @@ class DynamicCache(Cache):
                 # Step 3: Apply softmax
                 attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1)
 
-              
-                # Step 4: Create a mask for 50% low attention score tokens
-                attn_sum = attn_weights.sum(dim=-1)  # Sum across the last dimension (seq_len), shape: [batch_size, seq_len]
-                num_tokens_to_keep = attn_sum.shape[-1] // 2  # 50% of the sequence length
-                _, low_attn_indices = torch.topk(attn_sum, num_tokens_to_keep, largest=False, dim=-1)  # Get indices of the lowest 50%, shape: [batch_size, num_tokens_to_keep]
-
-                low_attn_mask = torch.zeros_like(attn_sum, dtype=torch.bool)  # Initialize a mask, shape: [batch_size, seq_len]
-                low_attn_mask.scatter_(1, low_attn_indices, True)  # Set True for low attention indices, shape: [batch_size, seq_len]
-                # Step 5: Calculate delta_V1 and delta_V2 for low attention tokens
+                # ... (Your existing code up to the calculation of attn_weights) ...
                 batch_size, num_heads, seq_len, hidden_dim = self.retained_value_cache[item[1]].shape
 
-                # Reshape value caches to [batch_size * num_heads * seq_len, hidden_dim] for easier indexing
-                retained_value_current = self.retained_value_cache[item[1]].view(-1, hidden_dim) 
-                retained_value_prev = self.retained_value_cache[item[0]].view(-1, hidden_dim)
-                # Expand attn_weights to match dimensions
-                attn_weights_expanded = attn_weights.unsqueeze(1).expand(-1, num_heads, -1, -1).reshape(batch_size*num_heads*seq_len,-1)
+                # Step 4: Create a mask for 50% low attention score tokens
+                attn_sum = attn_weights.sum(dim=-1)  # Sum across the last dimension (seq_len), shape: [batch_size, num_heads, seq_len]
+                num_tokens_to_keep = attn_sum.shape[-1] // 2  # 50% of the sequence length
+                _, low_attn_indices = torch.topk(attn_sum, num_tokens_to_keep, largest=False, dim=-1)  # Get indices of the lowest 50%, shape: [batch_size, num_heads, num_tokens_to_keep]
 
-                # Compute delta_V1 and delta_V2 using broadcasting
-
-                delta_V1 = torch.matmul(attn_weights_expanded, retained_value_current).view(batch_size,num_heads,seq_len,-1) # Shape: [batch_size, num_heads, seq_len, hidden_dim]
-                delta_V2 = torch.matmul(attn_weights_expanded, retained_value_current - retained_value_prev).view(batch_size,num_heads,seq_len,-1)  # Shape: [batch_size, num_heads, seq_len, hidden_dim]
+                # Step 5: Calculate delta_V1 and delta_V2 
+                delta_V1 = torch.matmul(attn_weights, self.retained_value_cache[item[1]])  # Shape: [batch_size, num_heads, seq_len, hidden_dim]
+                value_cache_prev_aligned = self.retained_value_cache[item[0]][:, :, -seq_len:, :]  # Shape: [batch_size, num_heads, seq_len, hidden_dim]
+                delta_V2 = torch.matmul(attn_weights, self.retained_value_cache[item[1]] - value_cache_prev_aligned)  # Shape: [batch_size, num_heads, seq_len, hidden_dim]
 
                 # Step 6: Determine eviction and replacement tokens based on delta norms
                 delta_V1_norm = delta_V1.norm(dim=-1)  # Shape: [batch_size, num_heads, seq_len]
                 delta_V2_norm = delta_V2.norm(dim=-1)  # Shape: [batch_size, num_heads, seq_len]
 
-                # since we want to apply this only on low attension tokens
-                delta_V1_norm_masked = delta_V1_norm.masked_fill(~low_attn_mask.unsqueeze(1), float('inf')) #Shape: [batch_size, num_heads, seq_len]
-                delta_V2_norm_masked = delta_V2_norm.masked_fill(~low_attn_mask.unsqueeze(1), float('inf')) #Shape: [batch_size, num_heads, seq_len]
-                # print(delta_V1_norm_masked,delta_V2_norm_masked)
-                # Create masks for eviction and replacement
-                eviction_mask = (delta_V1_norm_masked < delta_V2_norm_masked) & low_attn_mask.unsqueeze(1) # Shape: [batch_size, num_heads, seq_len]
-                replacement_mask = (delta_V2_norm_masked < delta_V1_norm_masked) & low_attn_mask.unsqueeze(1)  # Shape: [batch_size, num_heads, seq_len]
+                # Step 7: Create eviction and replacement indices *within the low attention tokens*
+                # We'll use gather to select delta norms only for the low attention tokens.
 
-                # Step 7: Replace tokens
-                # Replace both keys and values in the current layer with those from the previous layer
-                self.retained_key_cache[item[1]][replacement_mask] = self.retained_key_cache[item[0]][replacement_mask]  # Shape: [1, 32, n, 128] after replacement
-                self.retained_value_cache[item[1]][replacement_mask] = self.retained_value_cache[item[0]][replacement_mask]  # Shape: [1, 32, n, 128] after replacement
+                low_attn_delta_V1_norm = delta_V1_norm.gather(2, low_attn_indices)  # Shape: [batch_size, num_heads, num_tokens_to_keep]
+                low_attn_delta_V2_norm = delta_V2_norm.gather(2, low_attn_indices)  # Shape: [batch_size, num_heads, num_tokens_to_keep]
 
-                # Step 8: Evict tokens
+                # Compare delta norms within the low attention tokens
+                eviction_mask_low_attn = low_attn_delta_V1_norm < low_attn_delta_V2_norm  # Shape: [batch_size, num_heads, num_tokens_to_keep]
+                replacement_mask_low_attn = low_attn_delta_V1_norm >= low_attn_delta_V2_norm  # Shape: [batch_size, num_heads, num_tokens_to_keep]
 
-                # Get the indices of tokens to keep (not evict)
-                keep_mask = ~eviction_mask  # Shape: [batch_size, num_heads, seq_len]
-                keep_indices = keep_mask.nonzero(as_tuple=False) # Shape: [num_elements_to_keep, 3] (where 3 represents batch, head, seq_len indices)
+                # Get the actual indices for eviction and replacement using low_attn_indices
+                eviction_indices = low_attn_indices.masked_select(eviction_mask_low_attn)  # Shape: [num_eviction_tokens]
+                replacement_indices = low_attn_indices.masked_select(replacement_mask_low_attn)  # Shape: [num_replacement_tokens]
 
-                # Filter key and value caches based on keep_indices
-                # Assuming you want to maintain the batch and head dimensions and only reduce seq_len:
+                # Print the number of evicted and replaced tokens
+                num_eviction_tokens = eviction_indices.numel()
+                num_replacement_tokens = replacement_indices.numel()
+                print(f"Number of evicted tokens: {num_eviction_tokens}")
+                print(f"Number of replaced tokens: {num_replacement_tokens}")
 
-                # Initialize new key and value caches with appropriate size
-                new_key_cache = torch.zeros((batch_size, num_heads, keep_indices.shape[0], hidden_dim), device=self.retained_key_cache[item[1]].device)
-                new_value_cache = torch.zeros((batch_size, num_heads, keep_indices.shape[0], hidden_dim), device=self.retained_value_cache[item[1]].device)
-                # Gather the values to be kept
-                new_key_cache = self.retained_key_cache[item[1]][keep_mask]
-                new_value_cache = self.retained_value_cache[item[1]][keep_mask]
+                # Step 8: Replace tokens (using scatter)
+                # Reshape for scatter_
+                print('re',replacement_indices)
+                replacement_indices = replacement_indices.view(batch_size, num_heads, -1)
+                replacement_indices_expanded = replacement_indices.unsqueeze(-1).expand(-1, -1, -1, hidden_dim)
+                # Gather replacement values from the previous layer
+                replacement_key_values = self.retained_key_cache[item[0]][:, :, -seq_len:, :].gather(2, replacement_indices_expanded)
+                replacement_value_values = self.retained_value_cache[item[0]][:, :, -seq_len:, :].gather(2, replacement_indices_expanded)
+                # Scatter the replacement values into the current layer's cache at the appropriate indices
+                self.retained_key_cache[item[1]].scatter_(2, replacement_indices_expanded, replacement_key_values)
+                self.retained_value_cache[item[1]].scatter_(2, replacement_indices_expanded, replacement_value_values)
 
-                # Reshape to [batch_size, num_heads, num_kept_tokens, hidden_dim]
-
-                self.retained_key_cache[item[1]] = new_key_cache.view(batch_size, num_heads, -1, hidden_dim)  # Shape: [1, 32, m, 128] where m is the new sequence length
-                self.retained_value_cache[item[1]] = new_value_cache.view(batch_size, num_heads, -1, hidden_dim) # Shape: [1, 32, m, 128]
-
-
-        
-
+                # Step 9: Evict tokens 
+                # Get indices of tokens to keep (invert eviction mask within low_attn_indices)
+                keep_mask_low_attn = ~eviction_mask_low_attn  # Shape: [batch_size, num_heads, num_tokens_to_keep]
+                keep_indices = low_attn_indices.masked_select(keep_mask_low_attn)  # Shape: [num_keep_tokens]
+                # Reshape keep_indices for gather
+                keep_indices = keep_indices.view(batch_size, num_heads, -1)
+                keep_indices_expanded = keep_indices.unsqueeze(-1).expand(-1, -1, -1, hidden_dim)
+                # Gather the tokens to keep from the current cache
+                new_key_cache = self.retained_key_cache[item[1]].gather(2, keep_indices_expanded)
+                new_value_cache = self.retained_value_cache[item[1]].gather(2, keep_indices_expanded)
+                # Update the caches
+                self.retained_key_cache[item[1]] = new_key_cache
+                self.retained_value_cache[item[1]] = new_value_cache
 
         ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx])
 
