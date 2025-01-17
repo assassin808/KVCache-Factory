@@ -646,6 +646,7 @@ class _3DKVCluster():
             return key_states, value_states
         else:
             if layer_idx % 2 == 1:
+
                 attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim)
                 mask = torch.full((self.window_size, self.window_size), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
                 mask_cond = torch.arange(mask.size(-1), device=attn_weights.device)
@@ -662,19 +663,8 @@ class _3DKVCluster():
                 indices = attn_cache.topk(self.max_capacity_prompt - self.window_size, dim=-1).indices
                 indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
 
-                if self.merge is not None:
-                    key_states, value_states = merge_kv(key_states, value_states, indices, self.window_size, self.merge)
-                    return key_states, value_states
-
-                k_past_compress = key_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)
-                v_past_compress = value_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)
-                k_cur = key_states[:, :, -self.window_size:, :]
-                v_cur = value_states[:, :, -self.window_size:, :]
-            
-
-           
-                hidden_cur = hidden_states[:, :-self.window_size, :].gather(dim = 2, index = indices.min(dim=1)[0])
-                hidden_prev = prev_hidden_states[:, :-self.window_size, :].gather(dim = 2, index = indices.min(dim=1)[0]) 
+                hidden_cur = hidden_states
+                hidden_prev = prev_hidden_states
                 hidden_similarity_cross = torch.einsum("bsd,bsd->bs", hidden_cur/hidden_cur.norm(dim=-1,keepdim=True),  hidden_prev/hidden_prev.norm(dim=-1,keepdim=True))
 
                 hidden_similarity_cross = torch.einsum("bsd,bsd->bs", hidden_cur/hidden_cur.norm(dim=-1,keepdim=True),  hidden_prev/hidden_prev.norm(dim=-1,keepdim=True))
@@ -693,7 +683,7 @@ class _3DKVCluster():
                     hidden_similarity_local[:, i] = similarity_matrix[:, i, start:end].mean(dim=-1)
 
                 selected = hidden_similarity_cross < hidden_similarity_local
-                # print('selected:', item[0], item[1],selected.sum().item(), (~selected).sum().item())
+                print('selected:', item[0], item[1],selected.sum().item(), (~selected).sum().item())
                 # selected = selected.unsqueeze(0).expand(1,32,selected.shape[-1]).int()
             
                 # indices = selected.topk(selected.sum()//2//32, dim=-1).indices
@@ -709,9 +699,22 @@ class _3DKVCluster():
 
                
 
-                k_past_compress[selected] = prev_key_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)[selected]
-                v_past_compress[selected] = prev_value_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)[selected]
+                key_states[selected] = prev_key_states[selected]
+                value_states[selected] = prev_value_states[selected]
 
+
+              
+
+                
+
+                if self.merge is not None:
+                    key_states, value_states = merge_kv(key_states, value_states, indices, self.window_size, self.merge)
+                    return key_states, value_states
+
+                k_past_compress = key_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)
+                v_past_compress = value_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)
+                k_cur = key_states[:, :, -self.window_size:, :]
+                v_cur = value_states[:, :, -self.window_size:, :]
 
                 key_states = torch.cat([k_past_compress, k_cur], dim = 2)
                 value_states = torch.cat([v_past_compress, v_cur], dim = 2)
