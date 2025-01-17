@@ -313,14 +313,17 @@ class DynamicCache(Cache):
                 for j in range(31):
                     if i>=j:
                         continue
-                    k_prev = self.retained_key_cache[i]
-                    k = self.retained_key_cache[j]
+                    # k_prev = self.retained_value_cache[i]
+                    # k = self.retained_value_cache[j]
+                    k_prev = self.hidden_states[i]
+                    k = self.hidden_states[j]
                     # k_prev = k_prev.mean(dim = 1).mean(dim = 1)
                     # k = k.mean(dim = 1).mean(dim = 1)
 
                     # v_prev = self.retained_value_cache[i]
                     # v = self.retained_value_cache[j]
                     k_similarity = torch.einsum("bhsd,bhsd->bhs", self.attn_output[i]/self.attn_output[i].norm(dim=-1, keepdim=True), self.attn_output[j]/self.attn_output[j].norm(dim=-1, keepdim=True)).mean().item()
+                    # k_similarity = torch.einsum("bhsd,bhsd->bhs", self.attn_output[i], self.attn_output[j]).mean().item()
                     # attn_similarity = (torch.mean((self.attn_output[i] - self.attn_output[j])**2)).item()
 
                     # k_similarity = torch.norm(k_prev-k,p=2,dim=-1).mean().item()
@@ -330,13 +333,13 @@ class DynamicCache(Cache):
                     # k_similarity = -torch.mean(squared_diff).item()
                     # k_prev /=k_prev.norm(dim=-1, keepdim=True)
                     # k /=k.norm(dim=-1, keepdim=True)
-                    # k_similarity = torch.einsum("bhsd,bhsd->bhs", k_prev, k).mean().item()
+                    # k_similarity = torch.einsum("bsd,bsd->bs", k_prev, k).mean().item()
                     layer_map.append((i,j, k_similarity))
             layer_map.sort(key=lambda x:-x[-1])
             replaced_layer = set()
             used_layer = set()
             for item in layer_map:
-                if len(replaced_layer) > 8:
+                if len(replaced_layer) > 15:
                     break
                 if item[1] in replaced_layer or item[1] in used_layer or item[0] in replaced_layer:# or item[0] ==31 or  item[1] ==31:
                     continue
@@ -348,8 +351,15 @@ class DynamicCache(Cache):
                 attn_weights = attn_weights.mean(dim=1)  # Average over heads, shape becomes [batch_size, seq_len, seq_len]
 
                 # Step 2: Apply causal mask
-                causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-                attn_weights = attn_weights + causal_mask
+                mask = torch.full((2048, 2048), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
+                mask_cond = torch.arange(mask.size(-1), device=attn_weights.device)
+                mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
+                mask = mask.to(attn_weights.device)
+                attention_mask = mask[None, None, :, :]
+                attn_weights[:, :, -self.window_size:, -self.window_size:] += attention_mask
+
+                attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+                attn_weights_sum = attn_weights[:, :, :, : -self.window_size].sum(dim = -2)
 
                 # Step 3: Apply softmax
                 attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1)
@@ -357,9 +367,7 @@ class DynamicCache(Cache):
                 # ... (Your existing code up to the calculation of attn_weights) ...
                 batch_size, num_heads, seq_len, hidden_dim = self.retained_value_cache[item[1]].shape
 
-                # Step 4: Create a mask for 50% low attention score tokens
-                attn_sum = attn_weights.sum(dim=-1)  # Sum across the last dimension (seq_len), shape: [batch_size, num_heads, seq_len]
-                num_tokens_to_keep = attn_sum.shape[-1] // 2  # 50% of the sequence length
+                num_tokens_to_keep = self.max_capacity_prompt - self.window_size
                 _, low_attn_indices = torch.topk(attn_sum, num_tokens_to_keep, largest=False, dim=-1)  # Get indices of the lowest 50%, shape: [batch_size, num_heads, num_tokens_to_keep]
 
                 # Step 5: Calculate delta_V1 and delta_V2 
@@ -388,12 +396,11 @@ class DynamicCache(Cache):
                 # Print the number of evicted and replaced tokens
                 num_eviction_tokens = eviction_indices.numel()
                 num_replacement_tokens = replacement_indices.numel()
+                # with open("output.txt", "a") as f:
                 print(f"Number of evicted tokens: {num_eviction_tokens}")
                 print(f"Number of replaced tokens: {num_replacement_tokens}")
 
                 # Step 8: Replace tokens (using scatter)
-                print('re',replacement_indices)
-
 
                 # Gather replacement values from the previous layer
 
@@ -404,12 +411,18 @@ class DynamicCache(Cache):
 
                 # Step 9: Evict tokens 
                 # Get indices of tokens to keep (invert eviction mask within low_attn_indices)
-                keep_mask_low_attn = ~eviction_mask_low_attn  # Shape: [batch_size, num_heads, num_tokens_to_keep]
-                keep_indices = low_attn_indices.masked_select(keep_mask_low_attn)  # Shape: [num_keep_tokens]
+
+                mask = torch.ones(self.retained_value_cache[item[1]].shape[2], dtype=bool, device=self.retained_value_cache[item[1]].device)
+                mask[eviction_indices] = False 
+               
+
+
 
                 # Gather the values of the tokens to keep
-                self.retained_value_cache[item[1]] = self.retained_value_cache[item[1]][:, :, keep_indices, :]  # Shape: [batch_size, num_heads, num_keep_tokens, hidden_dim]
-                self.retained_key_cache[item[1]] = self.retained_key_cache[item[1]][:, :, keep_indices, :]  # Shape: [batch_size, num_heads, num_keep_tokens, hidden_dim]
+                self.retained_value_cache[item[1]] = self.retained_value_cache[item[1]][:, :, mask, :]  # Shape: [batch_size, num_heads, num_keep_tokens, hidden_dim]
+                self.retained_key_cache[item[1]] = self.retained_key_cache[item[1]][:, :, mask, :]  # Shape: [batch_size, num_heads, num_keep_tokens, hidden_dim]
+
+                # print('shape_key', self.retained_key_cache[item[1]].shape)
 
         ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx])
 
