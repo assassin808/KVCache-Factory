@@ -322,7 +322,7 @@ class DynamicCache(Cache):
 
                     # v_prev = self.retained_value_cache[i]
                     # v = self.retained_value_cache[j]
-                    k_similarity = torch.einsum("bhsd,bhsd->bhs", self.attn_output[i]/self.attn_output[i].norm(dim=-1, keepdim=True), self.attn_output[j]/self.attn_output[j].norm(dim=-1, keepdim=True)).mean().item()
+                    # k_similarity = torch.einsum("bhsd,bhsd->bhs", self.attn_output[i]/self.attn_output[i].norm(dim=-1, keepdim=True), self.attn_output[j]/self.attn_output[j].norm(dim=-1, keepdim=True)).mean().item()
                     # k_similarity = torch.einsum("bhsd,bhsd->bhs", self.attn_output[i], self.attn_output[j]).mean().item()
                     # attn_similarity = (torch.mean((self.attn_output[i] - self.attn_output[j])**2)).item()
 
@@ -334,7 +334,8 @@ class DynamicCache(Cache):
                     # k_prev /=k_prev.norm(dim=-1, keepdim=True)
                     # k /=k.norm(dim=-1, keepdim=True)
                     # k_similarity = torch.einsum("bsd,bsd->bs", k_prev, k).mean().item()
-                    layer_map.append((i,j, k_similarity))
+                    # import random
+                    layer_map.append((i,i+1, i ))#k_similarity* 0 + random.random()
             layer_map.sort(key=lambda x:-x[-1])
             replaced_layer = set()
             used_layer = set()
@@ -348,38 +349,78 @@ class DynamicCache(Cache):
 
                 # Step 1: Average attention weights over all heads
                 attn_weights = torch.matmul(self.query_states[item[1]], self.retained_key_cache[item[1]].transpose(2, 3)) / (self.retained_key_cache[item[1]].shape[-1] ** 0.5)
-                attn_weights = attn_weights.mean(dim=1)  # Average over heads, shape becomes [batch_size, seq_len, seq_len]
+                # attn_weights = attn_weights.mean(dim=1)  # Average over heads, shape becomes [batch_size, seq_len, seq_len]
 
+                window_size = 8
                 # Step 2: Apply causal mask
-                mask = torch.full((2048, 2048), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
+                mask = torch.full((window_size,window_size), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
                 mask_cond = torch.arange(mask.size(-1), device=attn_weights.device)
                 mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
                 mask = mask.to(attn_weights.device)
                 attention_mask = mask[None, None, :, :]
-                attn_weights[:, :, -self.window_size:, -self.window_size:] += attention_mask
-
-                attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-                attn_weights_sum = attn_weights[:, :, :, : -self.window_size].sum(dim = -2)
+                attn_weights[:, :, -window_size:, -window_size:] += attention_mask
+                import torch.nn as nn
+                attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(attn_weights.dtype)
+                attn_weights_sum = attn_weights[:, :, :, : -window_size].sum(dim = -2)
 
                 # Step 3: Apply softmax
                 attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1)
 
                 # ... (Your existing code up to the calculation of attn_weights) ...
                 batch_size, num_heads, seq_len, hidden_dim = self.retained_value_cache[item[1]].shape
+                
 
-                num_tokens_to_keep = 3950 - 2048
-                _, low_attn_indices = torch.topk(attn_sum, num_tokens_to_keep, largest=False, dim=-1)  # Get indices of the lowest 50%, shape: [batch_size, num_heads, num_tokens_to_keep]
+                num_tokens_to_keep = 2048 - window_size
+                _, indices = torch.topk(attn_weights_sum, num_tokens_to_keep, largest=False, dim=-1)  # Get indices of the lowest 50%, shape: [batch_size, num_heads, num_tokens_to_keep]
                 indices = indices.unsqueeze(-1).expand(-1, -1, -1, 128)
 
-                k_past_compress = self.retained_key_cache[item[1]][:, :, :-2048, :].gather(dim = 2, index = indices)
-                v_past_compress = self.retained_value_cache[item[1]][:, :, :-2048, :].gather(dim = 2, index = indices)
+                k_past_compress = self.retained_key_cache[item[1]][:, :, :-window_size, :].gather(dim = 2, index = indices)
+                v_past_compress = self.retained_value_cache[item[1]][:, :, :-window_size, :].gather(dim = 2, index = indices)
+                k_cur = self.retained_key_cache[item[1]][:, :, -window_size:, :]
+                v_cur = self.retained_value_cache[item[1]][:, :, -window_size:, :]
+               
 
-                hidden_similarity_cross = torch.einsum("bsd,bsd->bs", self.hidden_size[item[1]]/self.hidden_size[item[1]].norm(dim=-1),  self.hidden_size[item[0]]/self.hidden_size[item[0]].norm(dim=-1))
-                similarity_matrix = torch.matmul(self.hidden_size[item[1]]/self.hidden_size[item[1]].norm(dim=-1), (self.hidden_size[item[1]]/self.hidden_size[item[1]].norm(dim=-1)).transpose(-1, -2))
-                hidden_similarity_same = similarity_matrix.mean(dim=-1)
 
-                selected = hidden_similarity_cross > hidden_similarity_same
-                print('selected:', selected.sum().item())
+
+
+                hidden_cur = self.hidden_states[item[1]][:, :-window_size, :].gather(dim = 2, index = indices.min(dim=1)[0])
+                hidden_prev = self.hidden_states[item[0]][:, :-window_size, :].gather(dim = 2, index = indices.min(dim=1)[0]) 
+
+                hidden_similarity_cross = torch.einsum("bsd,bsd->bs", hidden_cur/hidden_cur.norm(dim=-1,keepdim=True),  hidden_prev/hidden_prev.norm(dim=-1,keepdim=True))
+                similarity_matrix = torch.matmul( hidden_cur/ hidden_cur.norm(dim=-1,keepdim=True), (hidden_cur/ hidden_cur.norm(dim=-1,keepdim=True)).transpose(-1, -2))
+
+                # Compute the average similarity over the surrounding tokens
+                hidden_similarity_local = torch.zeros_like(similarity_matrix[:, :, 0])  # Initialize output tensor [B, L]
+                L=hidden_similarity_local.shape[-1]
+
+                for i in range(L):
+                    # Define the start and end of the window
+                    start = max(0, i - 1)
+                    end = min(L, i  + 1)  # +1 because slicing is exclusive
+
+                    # Compute the average similarity within the window
+                    hidden_similarity_local[:, i] = similarity_matrix[:, i, start:end].mean(dim=-1)
+
+                selected = hidden_similarity_cross > hidden_similarity_local
+                # print('selected:', item[0], item[1],selected.sum().item(), (~selected).sum().item())
+                selected = selected.unsqueeze(0).expand(1,32,selected.shape[-1])
+                selected = selected.unsqueeze(-1).expand_as(k_past_compress)
+                # 1. remove itme whose cross similarity is low
+                # k_past_compress = k_past_compress[~selected]
+                # v_past_compress = v_past_compress[~selected]
+                # 2. replace withe next layer
+                # k_past_compress[selected] = self.retained_key_cache[item[1]][:, :, :-window_size, :].gather(dim = 2, index = indices)[selected]
+                # v_past_compress[selected] = self.retained_value_cache[item[1]][:, :, :-window_size, :].gather(dim = 2, index = indices)[selected]
+
+
+                self.retained_key_cache[item[1]] = torch.cat([k_past_compress, k_cur], dim = 2)
+                self.retained_value_cache[item[1]] = torch.cat([v_past_compress, v_cur], dim = 2)
+
+
+                
+
+
+               
 
 
 
