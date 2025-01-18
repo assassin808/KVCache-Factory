@@ -645,32 +645,31 @@ class _3DKVCluster():
         if q_len < self.max_capacity_prompt:
             return key_states, value_states
         else:
-            if layer_idx>=3:
+            if layer_idx % 2 ==1:
 
-                from sklearn.cluster import KMeans
-                from sklearn.metrics.pairwise import cosine_similarity
-                import numpy as np
+                # from sklearn.cluster import KMeans
+                # from sklearn.metrics.pairwise import cosine_similarity
+                # import numpy as np
 
-                A = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(128)
-                B = torch.matmul(query_states, prev_key_states.transpose(2, 3)) / math.sqrt(128)
+                # # A = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(128)
+                # # B = torch.matmul(query_states, prev_key_states.transpose(2, 3)) / math.sqrt(128)
                 # A=key_states
                 # B=prev_key_states
 
 
-                key_states_reshaped = A.mean(dim=1).reshape(-1, A.shape[-1]).cpu().numpy()
-                prev_key_states_reshaped = B.mean(dim=1).reshape(-1, A.shape[-1]).cpu().numpy()
+                # key_states_reshaped = A.mean(dim=1).reshape(-1, A.shape[-1]).cpu().numpy()
+                # prev_key_states_reshaped = B.mean(dim=1).reshape(-1, A.shape[-1]).cpu().numpy()
 
-                k = 5
-                kmeans_key = KMeans(n_clusters=k, random_state=0).fit(key_states_reshaped)
-                kmeans_prev_key = KMeans(n_clusters=k, random_state=0).fit(prev_key_states_reshaped)
-                prev_key_cluster_centers = torch.tensor(kmeans_prev_key.cluster_centers_, device='cuda')
+                # k = 3
+                # kmeans_key = KMeans(n_clusters=k, random_state=0).fit(key_states_reshaped)
+                # kmeans_prev_key = KMeans(n_clusters=k, random_state=0).fit(prev_key_states_reshaped)
 
-                # Get cluster indices for key_states
-                cluster_indices = kmeans_key.labels_  # Shape: [32 * n]
+                # # Step 4: Get cluster centers and labels
+                # key_cluster_centers = torch.tensor(kmeans_key.cluster_centers_, device='cuda')
+                # prev_key_cluster_centers = torch.tensor(kmeans_prev_key.cluster_centers_, device='cuda')
 
-                # Reshape prev_key_states to [32 * n, 128]
-
-                cluster_indices_tensor = torch.tensor(cluster_indices, device='cuda')
+                # key_cluster_labels = kmeans_key.labels_  # Shape: [32 * n]
+                # prev_key_cluster_labels = kmeans_prev_key.labels_  # Shape: [32 * n]
 
                 # Group prev_key_states according to the cluster indices from key_states
                 # prev_key_cluster_centers = torch.zeros(k, A.shape[-1], device='cuda')  # Initialize cluster centers for prev_key_states
@@ -682,27 +681,39 @@ class _3DKVCluster():
                 #         # Compute the mean of prev_key_states for this cluster
                 #         prev_key_cluster_centers[i] = torch.tensor(prev_key_states_reshaped[mask.cpu()]).mean(dim=0)
 
-                # Get the cluster centers for key_states and move them to GPU
-                key_cluster_centers = torch.tensor(kmeans_key.cluster_centers_, device='cuda')
+                # # Get the cluster centers for key_states and move them to GPU
+                # key_cluster_centers = torch.tensor(kmeans_key.cluster_centers_, device='cuda')
 
-                # Compute the similarity matrix (e.g., cosine similarity) on GPU
-                similarity_matrix = torch.nn.functional.cosine_similarity(
-                    key_cluster_centers.unsqueeze(1),  # Shape: [5, 1, 128]
-                    prev_key_cluster_centers.unsqueeze(0),  # Shape: [1, 5, 128]
-                    dim=2
-                )
+                # # Compute the similarity matrix (e.g., cosine similarity) on GPU
+                # similarity_matrix = torch.nn.functional.cosine_similarity(
+                #     key_cluster_centers.unsqueeze(1),  # Shape: [5, 1, 128]
+                #     prev_key_cluster_centers.unsqueeze(0),  # Shape: [1, 5, 128]
+                #     dim=2
+                # )
 
-                print("Similarity Matrix (5x5):")
-                print(similarity_matrix.cpu().numpy())  # Move to CPU for printing
-                key_cluster_labels = kmeans_key.labels_
-                prev_key_cluster_labels = kmeans_prev_key.labels_
+                # Step 6: Find cluster pairs with similarity >= 0.9
+                # threshold = 0.9
+                # cluster_pairs = torch.where(similarity_matrix >= threshold)
+                # print(cluster_pairs)
 
-                key_cluster_sizes_np = np.bincount(key_cluster_labels)
-                prev_key_cluster_sizes_np = np.bincount(prev_key_cluster_labels)
+                # # Step 7: Replace elements in key_states with corresponding elements from prev_key_states
+                # for key_cluster_idx, prev_key_cluster_idx in zip(cluster_pairs[0], cluster_pairs[1]):
+                #     # Get indices of elements in the current clusters
+                #     key_cluster_indices = np.where(key_cluster_labels == key_cluster_idx.item())[0]
+                #     prev_key_cluster_indices = np.where(prev_key_cluster_labels == prev_key_cluster_idx.item())[0]
 
-                print("Cluster sizes for key_states (using numpy):", key_cluster_sizes_np)
-                print("Cluster sizes for prev_key_states (using numpy):", prev_key_cluster_sizes_np)
+                #     # Make the lengths of the clusters equal by truncating the larger cluster
+                #     min_length = min(len(key_cluster_indices), len(prev_key_cluster_indices))
+                #     key_cluster_indices = key_cluster_indices[:min_length]
+                #     prev_key_cluster_indices = prev_key_cluster_indices[:min_length]
 
+                #     # Replace elements in key_states with elements from prev_key_states
+                #     key_states[:, :, key_cluster_indices, :] = prev_key_states[:, :, prev_key_cluster_indices, :]
+                #     value_states[:, :, key_cluster_indices, :] = prev_value_states[:, :, prev_key_cluster_indices, :]
+
+                # Final output
+                # print("Updated key_states:", key_states)
+                prev_attn_weights = torch.matmul(query_states, prev_key_states.transpose(2, 3)) / math.sqrt(head_dim)
 
                 attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim)
                 mask = torch.full((self.window_size, self.window_size), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
@@ -710,15 +721,32 @@ class _3DKVCluster():
                 mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
                 mask = mask.to(attn_weights.device)
                 attention_mask = mask[None, None, :, :]
-
+                
                 attn_weights[:, :, -self.window_size:, -self.window_size:] += attention_mask
+                prev_attn_weights[:, :, -self.window_size:, -self.window_size:] += attention_mask
 
                 attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
                 attn_weights_sum = attn_weights[:, :, :, : -self.window_size].sum(dim = -2)
+                prev_attn_weights = nn.functional.softmax(prev_attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+                prev_attn_weights_sum = prev_attn_weights[:, :, :, : -self.window_size].sum(dim = -2)
+
+                
 
                 attn_cache = attn_weights_sum
                 indices = attn_cache.topk(self.max_capacity_prompt - self.window_size, dim=-1).indices
                 indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
+
+
+                prev_attn_cache = prev_attn_weights_sum
+                prev_indices = ( - prev_attn_cache).topk(self.max_capacity_prompt // 2, dim=-1).indices
+                prev_indices = prev_indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
+
+                # key_states.scatter_(dim=2, index=prev_indices, src=prev_key_states[:, :, :-self.window_size, :])
+                # value_states.scatter_(dim=2, index=prev_indices, src=prev_value_states[:, :, :-self.window_size, :])
+
+
+
+
 
                 if self.merge is not None:
                     key_states, value_states = merge_kv(key_states, value_states, indices, self.window_size, self.merge)
@@ -771,8 +799,8 @@ class _3DKVCluster():
                 # v_past_compress[selected] = prev_value_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)[selected]
 
 
-                # key_states = torch.cat([k_past_compress, k_cur], dim = 2)
-                # value_states = torch.cat([v_past_compress, v_cur], dim = 2)
+                key_states = torch.cat([k_past_compress, k_cur], dim = 2)
+                value_states = torch.cat([v_past_compress, v_cur], dim = 2)
             return key_states, value_states
 
            
