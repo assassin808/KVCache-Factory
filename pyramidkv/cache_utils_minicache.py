@@ -360,7 +360,7 @@ class DynamicCache(Cache):
                 self.retained_value_cache[layer_j][:, :, seg_j*segment_size:(seg_j+1)*segment_size, :] = temp_value[layer_i][:, :, seg_i*segment_size:(seg_i+1)*segment_size, :]
 
             del temp_key
-            return ret_value[0], ret_value[1], ret_value[2]
+        return ret_value[0], ret_value[1], ret_value[2]
     def update_miniCache(
             self,
             key_states: torch.Tensor,
