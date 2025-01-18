@@ -305,14 +305,14 @@ class DynamicCache(Cache):
             segment_size = self.retained_key_cache[0].shape[2] // num_segments
 
             # Step 1: Average the key cache across all layers
-            averaged_keys = torch.mean(torch.stack(self.retained_key_cache), dim=0)  # Shape: [batch_size, num_heads, seq_len, dim]
+            averaged_keys = torch.mean(torch.stack(self.hidden_states), dim=0)  # Shape: [batch_size, num_heads, seq_len, dim]
 
             # Step 2: Cluster the averaged keys into k clusters (e.g., k=3)
             k = 5
-            batch_size, num_heads, seq_len, dim = averaged_keys.shape
+            batch_size,  seq_len, dim = averaged_keys.shape
             averaged_keys_reshaped = averaged_keys.reshape(-1, dim).cpu().numpy()  # Reshape for clustering
             kmeans = KMeans(n_clusters=k, random_state=0).fit(averaged_keys_reshaped)
-            cluster_labels = kmeans.labels_.reshape(batch_size, num_heads, seq_len)  # Reshape back to original shape
+            cluster_labels = kmeans.labels_.reshape(batch_size,  seq_len)  # Reshape back to original shape
 
             # Step 3: Assign segments to clusters
             cluster_segments = [[] for _ in range(k)]  # List to store segments for each cluster
@@ -321,7 +321,7 @@ class DynamicCache(Cache):
                     segment_start = seg * segment_size
                     segment_end = (seg + 1) * segment_size
                     # Get the cluster label for the majority of positions in the segment
-                    segment_labels = cluster_labels[:, :, segment_start:segment_end]
+                    segment_labels = cluster_labels[:, segment_start:segment_end]
                     segment_labels = torch.tensor(segment_labels, dtype=torch.long) 
                     cluster_label = torch.mode(segment_labels.flatten()).values.item()  # Majority cluster label
                     cluster_segments[cluster_label].append((i, seg))  # Store layer index and segment index
@@ -333,10 +333,16 @@ class DynamicCache(Cache):
                     for j in range(i + 1, len(segments_in_cluster)):
                         layer_i, seg_i = segments_in_cluster[i]
                         layer_j, seg_j = segments_in_cluster[j]
-                        k_prev_segment = self.retained_key_cache[layer_i][:, :, seg_i*segment_size:(seg_i+1)*segment_size, :]
-                        k_segment = self.retained_key_cache[layer_j][:, :, seg_j*segment_size:(seg_j+1)*segment_size, :]
-                        k_similarity = torch.einsum("bhsd,bhsd->bhs", k_prev_segment/k_prev_segment.norm(dim=-1,keepdim=True), k_segment/k_segment.norm(dim=-1,keepdim=True)).mean().item()
-                        layer_map.append((layer_i, layer_j, seg_i, seg_j, k_similarity))
+                        # Only compare segments at the same position
+                        if seg_i == seg_j:
+                            k_prev_segment = self.hidden_states[layer_i][:, seg_i * segment_size : (seg_i + 1) * segment_size, :]
+                            k_segment = self.hidden_states[layer_j][:, seg_j * segment_size : (seg_j + 1) * segment_size, :]
+                            k_similarity = torch.einsum(
+                                "bsd,bsd->bs",
+                                k_prev_segment / k_prev_segment.norm(dim=-1, keepdim=True),
+                                k_segment / k_segment.norm(dim=-1, keepdim=True),
+                            ).mean().item()
+                            layer_map.append((layer_i, layer_j, seg_i, seg_j, k_similarity))
 
             # Sort by similarity
             layer_map.sort(key=lambda x: x[-1])
@@ -348,6 +354,7 @@ class DynamicCache(Cache):
 
             for item in layer_map[:8 * k]:
                 layer_i, layer_j, seg_i, seg_j, _ = item
+                print(layer_i, layer_j, seg_i, seg_j, _)
                 self.retained_key_cache[layer_j][:, :, seg_j*segment_size:(seg_j+1)*segment_size, :] = temp_key[layer_i][:, :, seg_i*segment_size:(seg_i+1)*segment_size, :]
                 self.retained_value_cache[layer_j][:, :, seg_j*segment_size:(seg_j+1)*segment_size, :] = temp_value[layer_i][:, :, seg_i*segment_size:(seg_i+1)*segment_size, :]
 
