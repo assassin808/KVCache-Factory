@@ -322,11 +322,11 @@ class DynamicCache(Cache):
                     segment_end = (seg + 1) * segment_size
                     # Get the cluster label for the majority of positions in the segment
                     segment_labels = cluster_labels[:, :, segment_start:segment_end]
-                    segment_labels_tensor = torch.tensor(segment_labels, dtype=torch.long)  # Convert to PyTorch tensor
-                    cluster_label = torch.mode(segment_labels_tensor.flatten()).values.item()  # Majority cluster label
+                    segment_labels = torch.tensor(segment_labels, dtype=torch.long) 
+                    cluster_label = torch.mode(segment_labels.flatten()).values.item()  # Majority cluster label
                     cluster_segments[cluster_label].append((i, seg))  # Store layer index and segment index
 
-            # Step 4: Compare and share segments within the same cluster
+            # Step 4: Compare and share segments within the same cluster (cross-segment sharing)
             for cluster_idx in range(k):
                 segments_in_cluster = cluster_segments[cluster_idx]
                 for i in range(len(segments_in_cluster)):
