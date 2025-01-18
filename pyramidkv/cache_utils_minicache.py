@@ -326,7 +326,7 @@ class DynamicCache(Cache):
         replaced_segment = set()
         for item in layer_map:
             i, j, seg, _ = item
-            if len(replaced_segment)>=k * 8:
+            if len(replaced_segment)>=num_segments * 8:
                 break
             if (j,seg) in used_segment or (j,seg) in replaced_segment or (i,seg) in used_segment:
                 continue
