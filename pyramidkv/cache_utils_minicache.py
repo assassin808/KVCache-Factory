@@ -296,14 +296,18 @@ class DynamicCache(Cache):
         layer_map = []
 
         if layer_idx == 31:
+            num_segments = 3
+            segment_size = self.retained_key_cache[0].shape[2] // num_segments
             for i in range(32):
                 for j in range(32):
-                    if i>=j:
+                    if i >= j:
                         continue
-                    k_prev = self.retained_key_cache[i]
-                    k = self.retained_key_cache[j]
-                    k_similarity = torch.einsum("bhsd,bhsd->bhs", k_prev, k).mean().item()
-                    layer_map.append((i,j, k_similarity))
+                    for seg_i in range(num_segments):
+                        for seg_j in range(num_segments):
+                            k_prev_segment = self.retained_key_cache[i][:, :, seg_i*segment_size:(seg_i+1)*segment_size, :]
+                            k_segment = self.retained_key_cache[j][:, :, seg_j*segment_size:(seg_j+1)*segment_size, :]
+                            k_similarity = torch.einsum("bhsd,bhsd->bhs", k_prev_segment, k_segment).mean().item()
+                            layer_map.append((i, j, seg_i, seg_j, k_similarity))
         layer_map.sort(key=lambda x:x[-1])
 
         self.key_unit_cache.append(None)
@@ -318,9 +322,10 @@ class DynamicCache(Cache):
 
         temp_key = self.retained_key_cache.copy()
         temp_value = self.retained_value_cache.copy()
-        for item in layer_map[:8]:
-            self.retained_key_cache[item[1]] = temp_key[item[0]]
-            self.retained_value_cache[item[1]] = temp_value[item[0]]
+        for item in layer_map[:8*3]:
+            i, j, seg_i, seg_j, _ = item
+            self.retained_key_cache[j][:, :, seg_j*segment_size:(seg_j+1)*segment_size, :] = temp_key[i][:, :, seg_i*segment_size:(seg_i+1)*segment_size, :]
+            self.retained_value_cache[j][:, :, seg_j*segment_size:(seg_j+1)*segment_size, :] = temp_value[i][:, :, seg_i*segment_size:(seg_i+1)*segment_size, :]
 
         del temp_key
         return ret_value[0], ret_value[1], ret_value[2]
