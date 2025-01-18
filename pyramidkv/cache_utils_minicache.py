@@ -308,9 +308,9 @@ class DynamicCache(Cache):
                         k_segment = self.hidden_states[j][:, seg*segment_size:(seg+1)*segment_size, :]
                         # k_prev_segment = self.retained_value_cache[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
                         # k_segment = self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :]
-                        k_similarity = torch.einsum("bsd,bsd->bs", k_prev_segment, k_segment).mean().item()
+                        k_similarity = torch.einsum("bsd,bsd->bs", k_prev_segment/k_prev_segment.norm(dim=-1,keepdim=True), k_segment/k_segment.norm(dim=-1,keepdim=True)).mean().item()
                         layer_map.append((i, j, seg, k_similarity))  # Store layer indices, segment index, and similarity
-        layer_map.sort(key=lambda x:x[-1])
+        layer_map.sort(key=lambda x:abs(x[-1]))
 
         self.key_unit_cache.append(None)
         self.value_unit_cache.append(None)
