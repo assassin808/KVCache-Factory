@@ -296,7 +296,7 @@ class DynamicCache(Cache):
         layer_map = []
 
         if layer_idx == 31:
-            num_segments = 3
+            num_segments = 7
             segment_size = self.retained_key_cache[0].shape[2] // num_segments
             for i in range(32):
                 for j in range(32):
@@ -321,10 +321,10 @@ class DynamicCache(Cache):
 
         temp_key = self.retained_key_cache.copy()
         temp_value = self.retained_value_cache.copy()
-        for item in layer_map[:8*3*3//2]:
+        for item in layer_map[:8*7 *3 //2]:
             i, j, seg, _ = item
             self.retained_key_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_key[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
-            # self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_value[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
+            self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_value[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
 
         del temp_key
         return ret_value[0], ret_value[1], ret_value[2]
