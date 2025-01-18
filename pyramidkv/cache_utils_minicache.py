@@ -293,7 +293,6 @@ class DynamicCache(Cache):
         self.retained_value_cache.append(value_states)
         self.hidden_states.append(hidden_states)
 
-
         import torch
         from sklearn.cluster import KMeans
         import numpy as np
@@ -323,7 +322,8 @@ class DynamicCache(Cache):
                     segment_end = (seg + 1) * segment_size
                     # Get the cluster label for the majority of positions in the segment
                     segment_labels = cluster_labels[:, :, segment_start:segment_end]
-                    cluster_label = torch.mode(segment_labels.flatten()).values.item()  # Majority cluster label
+                    segment_labels_tensor = torch.tensor(segment_labels, dtype=torch.long)  # Convert to PyTorch tensor
+                    cluster_label = torch.mode(segment_labels_tensor.flatten()).values.item()  # Majority cluster label
                     cluster_segments[cluster_label].append((i, seg))  # Store layer index and segment index
 
             # Step 4: Compare and share segments within the same cluster
@@ -341,26 +341,37 @@ class DynamicCache(Cache):
             # Sort by similarity
             layer_map.sort(key=lambda x: x[-1])
 
-            self.key_unit_cache.append(None)
-            self.value_unit_cache.append(None)
-            self.key_magnitude.append(None)
-            self.value_magnitude.append(None)
-            self.mask_k.append(None)
-            self.mask_v.append(None)
-
-            ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx])
+                # Replace the top 8 segment pairs within clusters
 
             temp_key = self.retained_key_cache.copy()
             temp_value = self.retained_value_cache.copy()
 
-            # Replace the top 8 segment pairs within clusters
             for item in layer_map[:8 * k]:
                 layer_i, layer_j, seg_i, seg_j, _ = item
                 self.retained_key_cache[layer_j][:, :, seg_j*segment_size:(seg_j+1)*segment_size, :] = temp_key[layer_i][:, :, seg_i*segment_size:(seg_i+1)*segment_size, :]
                 self.retained_value_cache[layer_j][:, :, seg_j*segment_size:(seg_j+1)*segment_size, :] = temp_value[layer_i][:, :, seg_i*segment_size:(seg_i+1)*segment_size, :]
 
+         
             del temp_key
+           
+
+
+
+        self.key_unit_cache.append(None)
+        self.value_unit_cache.append(None)
+        self.key_magnitude.append(None)
+        self.value_magnitude.append(None)
+        self.mask_k.append(None)
+        self.mask_v.append(None)
+
+        ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx])
         return ret_value[0], ret_value[1], ret_value[2]
+
+           
+
+        
+      
+
     def update_miniCache(
             self,
             key_states: torch.Tensor,
