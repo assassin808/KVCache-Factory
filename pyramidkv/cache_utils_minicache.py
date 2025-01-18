@@ -308,7 +308,7 @@ class DynamicCache(Cache):
             averaged_keys = torch.mean(torch.stack(self.retained_key_cache), dim=0)  # Shape: [batch_size, num_heads, seq_len, dim]
 
             # Step 2: Cluster the averaged keys into k clusters (e.g., k=3)
-            k = 3
+            k = 7
             batch_size, num_heads, seq_len, dim = averaged_keys.shape
             averaged_keys_reshaped = averaged_keys.reshape(-1, dim).cpu().numpy()  # Reshape for clustering
             kmeans = KMeans(n_clusters=k, random_state=0).fit(averaged_keys_reshaped)
