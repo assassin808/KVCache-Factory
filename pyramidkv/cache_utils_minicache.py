@@ -296,7 +296,7 @@ class DynamicCache(Cache):
         layer_map = []
 
         if layer_idx == 31:
-            num_segments = 5
+            num_segments = 3
             segment_size = self.retained_key_cache[0].shape[2] // num_segments
             
             for i in range(32):
@@ -304,11 +304,11 @@ class DynamicCache(Cache):
                     if i >= j:
                         continue
                     for seg in range(num_segments):  # Only compare segments at the same position
-                        k_prev_segment = self.retained_key_cache[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
-                        k_segment = self.retained_key_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :]
+                        k_prev_segment = self.retained_value_cache[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
+                        k_segment = self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :]
                         k_similarity = torch.einsum("bhsd,bhsd->bhs", k_prev_segment/k_prev_segment.norm(dim=-1,keepdim=True), k_segment/k_segment.norm(dim=-1,keepdim=True)).mean().item()
                         layer_map.append((i, j, seg, k_similarity))  # Store layer indices, segment index, and similarity
-        layer_map.sort(key=lambda x:-x[-1])
+        layer_map.sort(key=lambda x:x[-1])
 
         self.key_unit_cache.append(None)
         self.value_unit_cache.append(None)
