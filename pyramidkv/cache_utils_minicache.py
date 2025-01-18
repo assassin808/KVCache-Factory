@@ -324,7 +324,7 @@ class DynamicCache(Cache):
         for item in layer_map[:8*3*2]:
             i, j, seg, _ = item
             self.retained_key_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_key[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
-            self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_value[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
+            # self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_value[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
 
         del temp_key
         return ret_value[0], ret_value[1], ret_value[2]
