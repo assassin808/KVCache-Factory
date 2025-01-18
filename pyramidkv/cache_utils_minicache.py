@@ -308,7 +308,7 @@ class DynamicCache(Cache):
             averaged_keys = torch.mean(torch.stack(self.retained_key_cache), dim=0)  # Shape: [batch_size, num_heads, seq_len, dim]
 
             # Step 2: Cluster the averaged keys into k clusters (e.g., k=3)
-            k = 7
+            k = 5
             batch_size, num_heads, seq_len, dim = averaged_keys.shape
             averaged_keys_reshaped = averaged_keys.reshape(-1, dim).cpu().numpy()  # Reshape for clustering
             kmeans = KMeans(n_clusters=k, random_state=0).fit(averaged_keys_reshaped)
@@ -335,7 +335,7 @@ class DynamicCache(Cache):
                         layer_j, seg_j = segments_in_cluster[j]
                         k_prev_segment = self.retained_key_cache[layer_i][:, :, seg_i*segment_size:(seg_i+1)*segment_size, :]
                         k_segment = self.retained_key_cache[layer_j][:, :, seg_j*segment_size:(seg_j+1)*segment_size, :]
-                        k_similarity = torch.einsum("bhsd,bhsd->bhs", k_prev_segment, k_segment).mean().item()
+                        k_similarity = torch.einsum("bhsd,bhsd->bhs", k_prev_segment/k_prev_segment.norm(dim=-1,keepdim=True), k_segment/k_segment.norm(dim=-1,keepdim=True)).mean().item()
                         layer_map.append((layer_i, layer_j, seg_i, seg_j, k_similarity))
 
             # Sort by similarity
