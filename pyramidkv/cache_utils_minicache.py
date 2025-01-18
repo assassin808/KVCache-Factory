@@ -296,8 +296,9 @@ class DynamicCache(Cache):
         layer_map = []
 
         if layer_idx == 31:
-            num_segments = 7
+            num_segments = 5
             segment_size = self.retained_key_cache[0].shape[2] // num_segments
+            
             for i in range(32):
                 for j in range(32):
                     if i >= j:
@@ -321,8 +322,14 @@ class DynamicCache(Cache):
 
         temp_key = self.retained_key_cache.copy()
         temp_value = self.retained_value_cache.copy()
-        for item in layer_map[:8*7 *3 //2]:
+        used_segment = set()
+        replaced_segment = set()
+        for item in layer_map:
             i, j, seg, _ = item
+            if (j,seg) in used_segment or (j,seg) in replaced_segment or (i,seg) in used_segment:
+                continue
+            used_segment.add((i,seg))
+            replaced_segment.add((j,seg))
             self.retained_key_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_key[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
             self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_value[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
 
