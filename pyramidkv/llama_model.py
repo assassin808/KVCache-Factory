@@ -1261,15 +1261,15 @@ def llama_attn_forward_3D(
         if self.layer_idx == 0:
             prev_key_states, prev_query_states, prev_value_states, prev_hidden_states = None, None, None, None
         else:
-            prev_key_states, prev_query_states, prev_value_states, prev_hidden_states = past_key_value.key_cache[self.layer_idx-1], None, past_key_value.value_cache[self.layer_idx-1], past_key_value.hidden_states[self.layer_idx-1]
+            prev_key_states, prev_query_states, prev_value_states, prev_hidden_states = past_key_value.key_cache[self.layer_idx-1], past_key_value.query_cache[self.layer_idx-1], past_key_value.value_cache[self.layer_idx-1], past_key_value.hidden_states[self.layer_idx-1]
 
         if key_states.shape[-2] == kv_seq_len:
             self.kv_seq_len = kv_seq_len
             key_states_compress, value_states_compress = self.kv_cluster.update_kv(key_states, query_states, value_states, attention_mask, self.num_key_value_groups, prev_key_states, prev_query_states, prev_value_states, hidden_states, prev_hidden_states, self.layer_idx)
-            past_key_value.update(key_states_compress, value_states_compress, self.layer_idx, cache_kwargs, hidden_states)
+            past_key_value.update(key_states_compress, value_states_compress, self.layer_idx, cache_kwargs, hidden_states, query_states)
         else:
             self.kv_seq_len += q_len
-            key_states, value_states, _ = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states, _, _ = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
         past_key_value._seen_tokens=self.kv_seq_len
 
 

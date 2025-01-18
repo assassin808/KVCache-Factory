@@ -645,7 +645,65 @@ class _3DKVCluster():
         if q_len < self.max_capacity_prompt:
             return key_states, value_states
         else:
-            if layer_idx % 2 == 1:
+            if layer_idx>=3:
+
+                from sklearn.cluster import KMeans
+                from sklearn.metrics.pairwise import cosine_similarity
+                import numpy as np
+
+                A = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(128)
+                B = torch.matmul(query_states, prev_key_states.transpose(2, 3)) / math.sqrt(128)
+                # A=key_states
+                # B=prev_key_states
+
+
+                key_states_reshaped = A.mean(dim=1).reshape(-1, A.shape[-1]).cpu().numpy()
+                prev_key_states_reshaped = B.mean(dim=1).reshape(-1, A.shape[-1]).cpu().numpy()
+
+                k = 5
+                kmeans_key = KMeans(n_clusters=k, random_state=0).fit(key_states_reshaped)
+                kmeans_prev_key = KMeans(n_clusters=k, random_state=0).fit(prev_key_states_reshaped)
+                prev_key_cluster_centers = torch.tensor(kmeans_prev_key.cluster_centers_, device='cuda')
+
+                # Get cluster indices for key_states
+                cluster_indices = kmeans_key.labels_  # Shape: [32 * n]
+
+                # Reshape prev_key_states to [32 * n, 128]
+
+                cluster_indices_tensor = torch.tensor(cluster_indices, device='cuda')
+
+                # Group prev_key_states according to the cluster indices from key_states
+                # prev_key_cluster_centers = torch.zeros(k, A.shape[-1], device='cuda')  # Initialize cluster centers for prev_key_states
+                # for i in range(k):
+                #     # Get the indices of vectors in prev_key_states that belong to cluster i
+                #     mask = cluster_indices_tensor == i  # Create a boolean mask for cluster i
+                #     print('shape',mask.shape,prev_key_states_reshaped.shape)
+                #     if mask.any():  # Check if there are any vectors in this cluster
+                #         # Compute the mean of prev_key_states for this cluster
+                #         prev_key_cluster_centers[i] = torch.tensor(prev_key_states_reshaped[mask.cpu()]).mean(dim=0)
+
+                # Get the cluster centers for key_states and move them to GPU
+                key_cluster_centers = torch.tensor(kmeans_key.cluster_centers_, device='cuda')
+
+                # Compute the similarity matrix (e.g., cosine similarity) on GPU
+                similarity_matrix = torch.nn.functional.cosine_similarity(
+                    key_cluster_centers.unsqueeze(1),  # Shape: [5, 1, 128]
+                    prev_key_cluster_centers.unsqueeze(0),  # Shape: [1, 5, 128]
+                    dim=2
+                )
+
+                print("Similarity Matrix (5x5):")
+                print(similarity_matrix.cpu().numpy())  # Move to CPU for printing
+                key_cluster_labels = kmeans_key.labels_
+                prev_key_cluster_labels = kmeans_prev_key.labels_
+
+                key_cluster_sizes_np = np.bincount(key_cluster_labels)
+                prev_key_cluster_sizes_np = np.bincount(prev_key_cluster_labels)
+
+                print("Cluster sizes for key_states (using numpy):", key_cluster_sizes_np)
+                print("Cluster sizes for prev_key_states (using numpy):", prev_key_cluster_sizes_np)
+
+
                 attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim)
                 mask = torch.full((self.window_size, self.window_size), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
                 mask_cond = torch.arange(mask.size(-1), device=attn_weights.device)
@@ -673,26 +731,26 @@ class _3DKVCluster():
             
 
            
-                hidden_cur = hidden_states[:, :-self.window_size, :].gather(dim = 2, index = indices.min(dim=1)[0])
-                hidden_prev = prev_hidden_states[:, :-self.window_size, :].gather(dim = 2, index = indices.min(dim=1)[0]) 
-                hidden_similarity_cross = torch.einsum("bsd,bsd->bs", hidden_cur/hidden_cur.norm(dim=-1,keepdim=True),  hidden_prev/hidden_prev.norm(dim=-1,keepdim=True))
+                # hidden_cur = hidden_states[:, :-self.window_size, :].gather(dim = 2, index = indices.min(dim=1)[0])
+                # hidden_prev = prev_hidden_states[:, :-self.window_size, :].gather(dim = 2, index = indices.min(dim=1)[0]) 
+                # hidden_similarity_cross = torch.einsum("bsd,bsd->bs", hidden_cur/hidden_cur.norm(dim=-1,keepdim=True),  hidden_prev/hidden_prev.norm(dim=-1,keepdim=True))
 
-                hidden_similarity_cross = torch.einsum("bsd,bsd->bs", hidden_cur/hidden_cur.norm(dim=-1,keepdim=True),  hidden_prev/hidden_prev.norm(dim=-1,keepdim=True))
-                similarity_matrix = torch.matmul( hidden_cur/ hidden_cur.norm(dim=-1,keepdim=True), (hidden_cur/ hidden_cur.norm(dim=-1,keepdim=True)).transpose(-1, -2))
+                # hidden_similarity_cross = torch.einsum("bsd,bsd->bs", hidden_cur/hidden_cur.norm(dim=-1,keepdim=True),  hidden_prev/hidden_prev.norm(dim=-1,keepdim=True))
+                # similarity_matrix = torch.matmul( hidden_cur/ hidden_cur.norm(dim=-1,keepdim=True), (hidden_cur/ hidden_cur.norm(dim=-1,keepdim=True)).transpose(-1, -2))
 
-                # Compute the average similarity over the surrounding tokens
-                hidden_similarity_local = torch.zeros_like(similarity_matrix[:, :, 0])  # Initialize output tensor [B, L]
-                L=hidden_similarity_local.shape[-1]
+                # # Compute the average similarity over the surrounding tokens
+                # hidden_similarity_local = torch.zeros_like(similarity_matrix[:, :, 0])  # Initialize output tensor [B, L]
+                # L=hidden_similarity_local.shape[-1]
 
-                for i in range(L):
-                    # Define the start and end of the window
-                    start = max(0, i - 1)
-                    end = min(L, i  + 1)  # +1 because slicing is exclusive
+                # for i in range(L):
+                #     # Define the start and end of the window
+                #     start = max(0, i - 1)
+                #     end = min(L, i  + 1)  # +1 because slicing is exclusive
 
-                    # Compute the average similarity within the window
-                    hidden_similarity_local[:, i] = similarity_matrix[:, i, start:end].mean(dim=-1)
+                #     # Compute the average similarity within the window
+                #     hidden_similarity_local[:, i] = similarity_matrix[:, i, start:end].mean(dim=-1)
 
-                selected = hidden_similarity_cross < hidden_similarity_local
+                # selected = hidden_similarity_cross < hidden_similarity_local
                 # print('selected:', item[0], item[1],selected.sum().item(), (~selected).sum().item())
                 # selected = selected.unsqueeze(0).expand(1,32,selected.shape[-1]).int()
             
@@ -704,17 +762,17 @@ class _3DKVCluster():
 
                 # 2. replace withe next layer
 
-                selected = selected.unsqueeze(0).expand(1,32,selected.shape[-1])
-                selected = selected.unsqueeze(-1).expand(1,32,selected.shape[-1],128)
+                # selected = selected.unsqueeze(0).expand(1,32,selected.shape[-1])
+                # selected = selected.unsqueeze(-1).expand(1,32,selected.shape[-1],128)
 
                
 
-                k_past_compress[selected] = prev_key_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)[selected]
-                v_past_compress[selected] = prev_value_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)[selected]
+                # k_past_compress[selected] = prev_key_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)[selected]
+                # v_past_compress[selected] = prev_value_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)[selected]
 
 
-                key_states = torch.cat([k_past_compress, k_cur], dim = 2)
-                value_states = torch.cat([v_past_compress, v_cur], dim = 2)
+                # key_states = torch.cat([k_past_compress, k_cur], dim = 2)
+                # value_states = torch.cat([v_past_compress, v_cur], dim = 2)
             return key_states, value_states
 
            

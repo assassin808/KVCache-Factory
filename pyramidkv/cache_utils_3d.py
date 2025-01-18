@@ -226,6 +226,7 @@ class DynamicCache(Cache):
 
 
       self.hidden_states = []
+      self.query_cache = []
 
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
@@ -259,6 +260,7 @@ class DynamicCache(Cache):
         layer_idx: int,
         cache_kwargs: Optional[Dict[str, Any]] = None,
         hidden_states: torch.Tensor = None, 
+        query_states: torch.Tensor = None, 
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
@@ -287,6 +289,7 @@ class DynamicCache(Cache):
             self.key_cache.append(key_states)
             self.value_cache.append(value_states)
             self.hidden_states.append(hidden_states)
+            self.query_cache.append(query_states)
         else:
             self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key_states], dim=-2)
             self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_states], dim=-2)
@@ -294,7 +297,7 @@ class DynamicCache(Cache):
 
 
         
-        return self.key_cache[layer_idx], self.value_cache[layer_idx], self.hidden_states[layer_idx]
+        return self.key_cache[layer_idx], self.value_cache[layer_idx], self.hidden_states[layer_idx], self.query_cache[layer_idx]
 
     @classmethod
     def from_legacy_cache(cls, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None) -> "MiniCache":
@@ -306,6 +309,7 @@ class DynamicCache(Cache):
                 cache.key_cache.append(past_key_values[layer_idx][0])
                 cache.value_cache.append(past_key_values[layer_idx][1])
                 cache.hidden_states.append(past_key_values[layer_idx][2])
+                cache.query_cache.append(past_key_values[layer_idx][3])
 
 
 
@@ -325,7 +329,7 @@ class DynamicCache(Cache):
         backward compatibility."""
         legacy_cache = ()
         for layer_idx in range(len(self)):
-            legacy_cache += ((self.key_cache[layer_idx],  self.value_cache[layer_idx], self.hidden_states[layer_idx]),)
+            legacy_cache += ((self.key_cache[layer_idx],  self.value_cache[layer_idx], self.hidden_states[layer_idx], self.query_cache[layer_idx]),)
         return legacy_cache
 
     def crop(self, max_length: int):
