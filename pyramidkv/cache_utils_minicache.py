@@ -296,7 +296,7 @@ class DynamicCache(Cache):
         layer_map = []
 
         if layer_idx == 31:
-            num_segments = 3
+            num_segments = 5
             segment_size = self.retained_key_cache[0].shape[2] // num_segments
             
             for i in range(32):
