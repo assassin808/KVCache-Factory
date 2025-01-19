@@ -306,11 +306,13 @@ class DynamicCache(Cache):
                     for seg in range(num_segments):  # Only compare segments at the same position
                         k_prev_segment = self.hidden_states[i][:, seg*segment_size:(seg+1)*segment_size, :]
                         k_segment = self.hidden_states[j][:, seg*segment_size:(seg+1)*segment_size, :]
-                        # k_prev_segment = self.retained_value_cache[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
-                        # k_segment = self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :]
-                        k_similarity = torch.einsum("bsd,bsd->bs", k_prev_segment/k_prev_segment.norm(dim=-1,keepdim=True), k_segment/k_segment.norm(dim=-1,keepdim=True)).mean().item()
+                        k_prev_segment = self.retained_key_cache[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
+                        k_segment = self.retained_key_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :]
+                        k_similarity = torch.einsum("bhsd,bhsd->bhs", k_prev_segment/k_prev_segment.norm(dim=-1,keepdim=True), k_segment/k_segment.norm(dim=-1,keepdim=True)).mean().item()
                         layer_map.append((i, j, seg, k_similarity))  # Store layer indices, segment index, and similarity
-        layer_map.sort(key=lambda x:x[-1])
+        layer_mean = [i[-1] for i in layer_map]
+        layer_map.sort(key=lambda x:-x[-1])
+
 
         self.key_unit_cache.append(None)
         self.value_unit_cache.append(None)
@@ -321,22 +323,31 @@ class DynamicCache(Cache):
 
 
         ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx])
-
-        temp_key = self.retained_key_cache.copy()
-        temp_value = self.retained_value_cache.copy()
+        import copy
+        temp_key = copy.deepcopy(self.retained_key_cache)
+        temp_value = copy.deepcopy(self.retained_value_cache)
         used_segment = set()
         replaced_segment = set()
         for item in layer_map:
             i, j, seg, _ = item
-            print(i, j, seg, _)
+            
+            
             if len(replaced_segment)>=num_segments * 8:
                 break
-            if (j,seg) in used_segment or (j,seg) in replaced_segment or (i,seg) in used_segment:
+            if (j,seg) in used_segment or (j,seg) in replaced_segment or (i,seg) in replaced_segment:
                 continue
+            print(i, j, seg, _)
+            with open('output.txt','a') as f:
+                print(i, j, seg, file=f)
+            # if i<=1:
+                # continue
             used_segment.add((i,seg))
             replaced_segment.add((j,seg))
             self.retained_key_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_key[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
             self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_value[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
+
+            self.retained_key_cache[j][:, :, -8:, :] = temp_key[i][:, :,-8:, :]
+            self.retained_value_cache[j][:, :, -8:, :] = temp_value[i][:, :, -8:, :]
 
         del temp_key
         return ret_value[0], ret_value[1], ret_value[2]
