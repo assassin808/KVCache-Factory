@@ -676,15 +676,15 @@ class H2OKVCluster():
                 key_states, value_states = merge_kv(key_states, value_states, indices, self.window_size, self.merge)
                 return key_states, value_states
 
-            k_past_compress = key_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)
-            v_past_compress = value_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)
-            h_past_compress = hidden_states[:, :-self.window_size, :].gather(dim = 1, index = indices_hidden.min(dim=1)[0])
-            k_cur = key_states[:, :, -self.window_size:, :]
-            v_cur = value_states[:, :, -self.window_size:, :]
-            h_cur = hidden_states[:,  -self.window_size:, :]
-            key_states = torch.cat([k_past_compress, k_cur], dim = 2)
-            value_states = torch.cat([v_past_compress, v_cur], dim = 2)
-            hidden_states = torch.cat([h_past_compress, h_cur], dim = 1)
+            # k_past_compress = key_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)
+            # v_past_compress = value_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)
+            # h_past_compress = hidden_states[:, :-self.window_size, :].gather(dim = 1, index = indices_hidden.min(dim=1)[0])
+            # k_cur = key_states[:, :, -self.window_size:, :]
+            # v_cur = value_states[:, :, -self.window_size:, :]
+            # h_cur = hidden_states[:,  -self.window_size:, :]
+            # key_states = torch.cat([k_past_compress, k_cur], dim = 2)
+            # value_states = torch.cat([v_past_compress, v_cur], dim = 2)
+            # hidden_states = torch.cat([h_past_compress, h_cur], dim = 1)
             return key_states, value_states, indices
 
 
