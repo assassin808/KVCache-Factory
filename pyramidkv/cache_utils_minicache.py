@@ -336,9 +336,9 @@ class DynamicCache(Cache):
                 break
             if (j,seg) in used_segment or (j,seg) in replaced_segment or (i,seg) in replaced_segment:
                 continue
-            print(i, j, seg, _)
-            with open('output.txt','a') as f:
-                print(i, j, seg, file=f)
+            # print(i, j, seg, _)
+            # with open('output.txt','a') as f:
+            #     print(i, j, seg, file=f)
             # if i<=1:
                 # continue
             used_segment.add((i,seg))
