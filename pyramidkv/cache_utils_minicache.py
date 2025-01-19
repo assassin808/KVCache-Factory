@@ -326,8 +326,8 @@ class DynamicCache(Cache):
 
         ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx])
 
-        temp_key = self.retained_key_cache.copy()
-        temp_value = self.retained_value_cache.copy()
+        temp_key = [t.clone() for t in self.retained_key_cache]
+        temp_value = [t.clone() for t in self.retained_value_cache]
         used_segment = set()
         replaced_segment = set()
         for item in layer_map:
