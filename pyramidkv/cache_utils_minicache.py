@@ -343,6 +343,11 @@ class DynamicCache(Cache):
             self.retained_key_cache[j][:, :, -8:, :] = temp_key[i][:, :, -8:, :]
             self.retained_value_cache[j][:, :, -8:, :] = temp_value[i][:, :, -8:, :]
 
+        layer_set = set()
+        for (j,seg) in list(replaced_segment):
+            if j in layer_set:
+                continue
+            layer_set.add(j)
             indices = self.index_cache[j]
             k_past_compress = self.retained_key_cache[j][:, :, :-8, :].gather(dim = 2, index = indices)
             k_cur = self.retained_key_cache[j][:, :, -8:, :]

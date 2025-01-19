@@ -536,9 +536,9 @@ def llama_attn_forward_MiniCache(
             self.kv_seq_len = kv_seq_len
             key_states_compress, value_states_compress, hidden_states_compress = key_states, value_states, hidden_states
             _, _, indices = self.kv_cluster.update_kv(key_states, query_states, value_states, attention_mask, self.num_key_value_groups, hidden_states)
-            key_states, value_states, hidden_states = past_key_value.update(key_states_compress, value_states_compress, self.layer_idx, cache_kwargs, hidden_states_compress)
             past_key_value.index_cache.append(indices)
-
+            key_states, value_states, hidden_states = past_key_value.update(key_states_compress, value_states_compress, self.layer_idx, cache_kwargs, hidden_states_compress)
+            
             # if self.layer_idx == 0:
             #     previous_key_states, previous_value_states, previous_hidden_states = None, None, None
             # else:
