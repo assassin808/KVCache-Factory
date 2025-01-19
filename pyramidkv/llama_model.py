@@ -469,7 +469,7 @@ def llama_attn_forward_MiniCache(
     bsz, q_len, _ = hidden_states.size()
 
     # Initialize MiniCacheKVCluster and MiniCache if they don't exist
-    init_MiniCacheKV(self, num_hidden_layers=self.config.num_hidden_layers)
+    init_H2O(self)
     if self.config.pretraining_tp > 1:
         key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
         query_slices = self.q_proj.weight.split(
@@ -534,7 +534,10 @@ def llama_attn_forward_MiniCache(
 
         if key_states.shape[-2] == kv_seq_len:
             self.kv_seq_len = kv_seq_len
-            key_states, value_states, hidden_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs, hidden_states)
+            key_states_compress, value_states_compress, hidden_states_compress = key_states, value_states, hidden_states
+            _, _, indices = self.kv_cluster.update_kv(key_states, query_states, value_states, attention_mask, self.num_key_value_groups, hidden_states)
+            key_states, value_states, hidden_states = past_key_value.update(key_states_compress, value_states_compress, self.layer_idx, cache_kwargs, hidden_states_compress)
+            past_key_value.index_cache.append(indices)
 
             # if self.layer_idx == 0:
             #     previous_key_states, previous_value_states, previous_hidden_states = None, None, None
@@ -1395,7 +1398,7 @@ def llama_attn_forward_H2O(
 
         if key_states.shape[-2] == kv_seq_len:
             self.kv_seq_len = kv_seq_len
-            key_states_compress, value_states_compress = self.kv_cluster.update_kv(key_states, query_states, value_states, attention_mask, self.num_key_value_groups)
+            key_states_compress, value_states_compress, _ = self.kv_cluster.update_kv(key_states, query_states, value_states, attention_mask, self.num_key_value_groups, hidden_states)
             past_key_value.update(key_states_compress, value_states_compress, self.layer_idx, cache_kwargs)
         else:
             self.kv_seq_len += q_len

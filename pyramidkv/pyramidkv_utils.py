@@ -639,7 +639,7 @@ class H2OKVCluster():
         self.pooling = pooling
         self.merge = merge
 
-    def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups):
+    def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups, hidden_states):
         
         # check if prefix phase
         assert key_states.shape[-2] == query_states.shape[-2]
@@ -669,6 +669,7 @@ class H2OKVCluster():
             #     raise ValueError('Pooling method not supported')
             attn_cache = attn_weights_sum
             indices = attn_cache.topk(self.max_capacity_prompt - self.window_size, dim=-1).indices
+            indices_hidden =  indices.unsqueeze(-1).expand(-1, -1, -1, hidden_states.shape[-1])
             indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
 
             if self.merge is not None:
@@ -677,11 +678,14 @@ class H2OKVCluster():
 
             k_past_compress = key_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)
             v_past_compress = value_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)
+            h_past_compress = hidden_states[:, :-self.window_size, :].gather(dim = 1, index = indices_hidden.min(dim=1)[0])
             k_cur = key_states[:, :, -self.window_size:, :]
             v_cur = value_states[:, :, -self.window_size:, :]
+            h_cur = hidden_states[:,  -self.window_size:, :]
             key_states = torch.cat([k_past_compress, k_cur], dim = 2)
             value_states = torch.cat([v_past_compress, v_cur], dim = 2)
-            return key_states, value_states
+            hidden_states = torch.cat([h_past_compress, h_cur], dim = 1)
+            return key_states, value_states, indices
 
 
 class StreamingLLMKVCluster():

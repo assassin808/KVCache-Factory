@@ -232,6 +232,7 @@ class DynamicCache(Cache):
       self.mask_v = []
 
       self.hidden_states = []
+      self.index_cache = []
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
         """
@@ -297,6 +298,7 @@ class DynamicCache(Cache):
 
         if layer_idx == 31:
             num_segments = 3
+            print('fsdfdsfafsa',self.retained_key_cache[0].shape)
             segment_size = self.retained_key_cache[0].shape[2] // num_segments
             
             for i in range(32):
@@ -337,6 +339,17 @@ class DynamicCache(Cache):
             replaced_segment.add((j,seg))
             self.retained_key_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_key[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
             self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_value[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
+            self.retained_key_cache[j][:, :, -8:, :] = temp_key[i][:, :, -8:, :]
+            self.retained_value_cache[j][:, :, -8:, :] = temp_value[i][:, :, -8:, :]
+
+            indices = self.index_cache[j]
+            k_past_compress = self.retained_key_cache[j][:, :, :-8, :].gather(dim = 2, index = indices)
+            k_cur = self.retained_key_cache[j][:, :, -8:, :]
+            self.retained_key_cache[j] = torch.cat([k_past_compress, k_cur], dim = 2)
+
+            v_past_compress = self.retained_value_cache[j][:, :, :-8, :].gather(dim = 2, index = indices)
+            v_cur = self.retained_value_cache[j][:, :, -8:, :]
+            self.retained_value_cache[j] = torch.cat([v_past_compress, v_cur], dim = 2)
 
         del temp_key
         return ret_value[0], ret_value[1], ret_value[2]
@@ -432,6 +445,7 @@ class DynamicCache(Cache):
                 cache.value_magnitude.append(past_key_values[layer_idx][5])
                 cache.mask_k.append(past_key_values[layer_idx][6])
                 cache.mask_v.append(past_key_values[layer_idx][7])
+                cache.index_cache.append(past_key_values[layer_idx][7])
 
 
         return cache
@@ -450,7 +464,7 @@ class DynamicCache(Cache):
         backward compatibility."""
         legacy_cache = ()
         for layer_idx in range(len(self)):
-            legacy_cache += ((self.retained_key_cache[layer_idx],  self.retained_value_cache[layer_idx], self.key_unit_cache[layer_idx], self.value_unit_cache[layer_idx], self.key_magnitude[layer_idx], self.value_magnitude[layer_idx], self.mask_k[layer_idx], self.mask_v[layer_idx]),)
+            legacy_cache += ((self.retained_key_cache[layer_idx],  self.retained_value_cache[layer_idx], self.key_unit_cache[layer_idx], self.value_unit_cache[layer_idx], self.key_magnitude[layer_idx], self.value_magnitude[layer_idx], self.mask_k[layer_idx], self.mask_v[layer_idx], self.index_cache[layer_idx]),)
         return legacy_cache
 
     def crop(self, max_length: int):
