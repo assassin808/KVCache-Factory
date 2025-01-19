@@ -298,6 +298,7 @@ class DynamicCache(Cache):
         if layer_idx == 31:
             num_segments = 3
             segment_size = self.retained_key_cache[0].shape[2] // num_segments
+            avg_sim = [0 for i in range(32)]
             
             for i in range(32):
                 for j in range(32):
@@ -310,6 +311,9 @@ class DynamicCache(Cache):
                         # k_segment = self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :]
                         k_similarity = torch.einsum("bsd,bsd->bs", k_prev_segment/k_prev_segment.norm(dim=-1,keepdim=True), k_segment/k_segment.norm(dim=-1,keepdim=True)).mean().item()
                         layer_map.append((i, j, seg, k_similarity))  # Store layer indices, segment index, and similarity
+                        avg_sim[i]+=k_similarity
+                        avg_sim[j]+=k_similarity
+            print(avg_sim)
         layer_map.sort(key=lambda x:x[-1])
 
         self.key_unit_cache.append(None)
