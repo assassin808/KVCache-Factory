@@ -534,7 +534,8 @@ def llama_attn_forward_MiniCache(
 
         if key_states.shape[-2] == kv_seq_len:
             self.kv_seq_len = kv_seq_len
-            key_states, value_states, hidden_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs, hidden_states, query_states, attention_mask)
+            # key_states, value_states, hidden_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs, hidden_states, query_states, attention_mask)
+            key_states, value_states, hidden_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs, hidden_states)
 
             # if self.layer_idx == 0:
             #     previous_key_states, previous_value_states, previous_hidden_states = None, None, None
@@ -560,6 +561,7 @@ def llama_attn_forward_MiniCache(
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
     attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
     attn_output = torch.matmul(attn_weights, value_states)
+    past_key_value.store_output(attn_weights.mean(dim=-2))
 
 
     del key_states, value_states

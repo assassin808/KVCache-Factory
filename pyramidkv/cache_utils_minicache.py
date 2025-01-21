@@ -233,6 +233,7 @@ class DynamicCache(Cache):
 
       self.hidden_states = []
       self.retained_query_cache = []
+      self.attn_output = []
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
         """
@@ -258,6 +259,8 @@ class DynamicCache(Cache):
         to the number of layers in the model.
         """
         return len(self.retained_key_cache)
+    def store_output(self,out):
+        self.attn_output.append(out)
     def update(
         self,
         key_states: torch.Tensor,
@@ -302,29 +305,38 @@ class DynamicCache(Cache):
         if layer_idx == 31:
             num_segments = 10
             segment_size = self.retained_key_cache[0].shape[2] // num_segments
-            for i in range(0, 31, 2):
-                import torch.nn.functional as F
-                import torch.nn as nn
-                causal_mask = attention_mask[:, :, :, : self.retained_key_cache[0].shape[-2]]
-                temp_prev = torch.matmul(self.retained_query_cache[i], self.retained_key_cache[i].transpose(2, 3))
-                attn_weights = temp_prev + causal_mask
-                temp_prev = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-                temp_prev = torch.matmul(attn_weights, self.retained_value_cache[i])
+            import torch.nn.functional as F
+            import torch.nn as nn
+            import math
+            temp_prev = temp = None
 
-                temp =torch.matmul(self.retained_query_cache[i+1], self.retained_key_cache[i+1].transpose(2, 3))
-                attn_weights = temp + causal_mask
-                temp = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-                temp = torch.matmul(attn_weights, self.retained_value_cache[i+1])
+
+            for i in range(0, 31, 2):
+                print(i)
+                
+                # causal_mask = attention_mask[:, :, :, : self.retained_key_cache[0].shape[-2]]
+                # temp_prev = torch.matmul(self.retained_query_cache[i], self.retained_key_cache[i].transpose(2, 3))  / math.sqrt(self.retained_key_cache[0].shape[-1])
+                # attn_weights = temp_prev + causal_mask
+                # attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype) 
+                # temp_prev = torch.matmul(attn_weights, self.retained_value_cache[i])
+                temp_prev = self.retained_key_cache[i]
+
+                # temp =torch.matmul(self.retained_query_cache[i+1], self.retained_key_cache[i+1].transpose(2, 3))  / math.sqrt(self.retained_key_cache[0].shape[-1])
+                # attn_weights = temp + causal_mask
+                # attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+                # temp = torch.matmul(attn_weights, self.retained_value_cache[i+1])
+                temp = self.retained_key_cache[i+1]
+
                 for seg in range(num_segments-1):
-                    k_prev_segment = temp_prev[:,:, seg*segment_size:(seg+1)*segment_size, :]
-                    k_segment = temp[:,:,  seg*segment_size:(seg+1)*segment_size, :]
-                    k_segment_next = temp[:,:,  (seg+1)*segment_size:(seg+2)*segment_size, :]
+                    k_prev_segment = temp_prev[:,:, seg*segment_size:(seg+1)*segment_size,:].mean(dim=-2,keepdim=True)
+                    k_segment = temp[:,:,  seg*segment_size:(seg+1)*segment_size,:].mean(dim=-2,keepdim=True)
+                    k_segment_next = temp[:,:,  (seg+1)*segment_size:(seg+2)*segment_size,:].mean(dim=-2,keepdim=True)
                     k_similarity = torch.einsum("bhsd,bhsd->bhs", k_prev_segment/k_prev_segment.norm(dim=-1,keepdim=True), k_segment/k_segment.norm(dim=-1,keepdim=True)).mean().item()
-                    attn_prev = k_prev_segment.sum(dim = -2)[:,:,  seg*segment_size:(seg+1)*segment_size].mean()
+                    # attn_prev = k_prev_segment.sum(dim = -2)[:,:,  seg*segment_size:(seg+1)*segment_size].mean()
                     k_similarity_same = torch.einsum("bhsd,bhsd->bhs", k_prev_segment/k_prev_segment.norm(dim=-1,keepdim=True), k_segment_next/k_segment_next.norm(dim=-1,keepdim=True)).mean().item()
-                    attn = k_segment.sum(dim = -2)[:,:,  seg*segment_size:(seg+1)*segment_size].mean()
+                    # attn = k_segment.sum(dim = -2)[:,:,  seg*segment_size:(seg+1)*segment_size].mean()
                     print(k_similarity,k_similarity_same)
-                    if attn_prev >= attn and k_similarity_same <0.05:
+                    if k_similarity >= 0.01:
                         layer_map.append((i, i+1, seg, k_similarity))
             print(len(layer_map)/(num_segments-1)/16)
             
@@ -350,7 +362,7 @@ class DynamicCache(Cache):
 
 
 
-        ret_value = (self.retained_key_cache[layer_idx].clone(), self.retained_value_cache[layer_idx].clone(), self.hidden_states[layer_idx].clone())
+        ret_value = (self.retained_key_cache[layer_idx].clone(), self.retained_value_cache[layer_idx].clone(), self.hidden_states[layer_idx])
 
         temp_key = [i.clone() for i in self.retained_key_cache]
         temp_value = [i.clone() for i in self.retained_value_cache]
