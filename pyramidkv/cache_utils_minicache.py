@@ -232,6 +232,7 @@ class DynamicCache(Cache):
       self.mask_v = []
 
       self.hidden_states = []
+      self.retained_query_cache = []
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
         """
@@ -264,6 +265,8 @@ class DynamicCache(Cache):
         layer_idx: int,
         cache_kwargs: Optional[Dict[str, Any]] = None,
         hidden_states: torch.Tensor = None, 
+        query_states: torch.Tensor = None, 
+        attention_mask = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
@@ -292,24 +295,49 @@ class DynamicCache(Cache):
         self.retained_key_cache.append(key_states)
         self.retained_value_cache.append(value_states)
         self.hidden_states.append(hidden_states)
+        self.retained_query_cache.append(query_states)
 
         layer_map = []
 
         if layer_idx == 31:
-            num_segments = 3
+            num_segments = 10
             segment_size = self.retained_key_cache[0].shape[2] // num_segments
+            for i in range(0, 31, 2):
+                import torch.nn.functional as F
+                import torch.nn as nn
+                temp_prev = torch.matmul(self.retained_query_cache[i], self.retained_key_cache[i].transpose(2, 3))
+                causal_mask = attention_mask[:, :, :, : self.retained_key_cache[0].shape[-2]]
+                attn_weights = temp_prev + causal_mask
+                temp_prev = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+
+                temp =torch.matmul(self.retained_query_cache[i+1], self.retained_key_cache[i+1].transpose(2, 3))
+                causal_mask = attention_mask[:, :, :, : self.retained_key_cache[0].shape[-2]]
+                attn_weights = temp + causal_mask
+                temp = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+                for seg in range(num_segments-1):
+                    k_prev_segment = temp_prev[:,:, seg*segment_size:(seg+1)*segment_size, :]
+                    k_segment = temp[:,:,  seg*segment_size:(seg+1)*segment_size, :]
+                    k_segment_next = temp[:,:,  (seg+1)*segment_size:(seg+2)*segment_size, :]
+                    k_similarity = torch.einsum("bhsd,bhsd->bhs", k_prev_segment/k_prev_segment.norm(dim=-1,keepdim=True), k_segment/k_segment.norm(dim=-1,keepdim=True)).mean().item()
+                    k_similarity = k_prev_segment.sum(dim = -2)[:,:,  seg*segment_size:(seg+1)*segment_size].mean()
+                    k_similarity_same = torch.einsum("bhsd,bhsd->bhs", k_prev_segment/k_prev_segment.norm(dim=-1,keepdim=True), k_segment_next/k_segment_next.norm(dim=-1,keepdim=True)).mean().item()
+                    k_similarity_same = k_segment.sum(dim = -2)[:,:,  seg*segment_size:(seg+1)*segment_size].mean()
+                    print(k_similarity,k_similarity_same)
+                    if k_similarity >= k_similarity_same and k_similarity_same <0.05:
+                        layer_map.append((i, i+1, seg, k_similarity))
+            print(len(layer_map)/(num_segments-1)/16)
             
-            for i in range(32):
-                for j in range(32):
-                    if i >= j:
-                        continue
-                    for seg in range(num_segments):  # Only compare segments at the same position
-                        k_prev_segment = self.hidden_states[i][:, seg*segment_size:(seg+1)*segment_size, :]
-                        k_segment = self.hidden_states[j][:, seg*segment_size:(seg+1)*segment_size, :]
-                        # k_prev_segment = self.retained_value_cache[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
-                        # k_segment = self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :]
-                        k_similarity = torch.einsum("bsd,bsd->bs", k_prev_segment/k_prev_segment.norm(dim=-1,keepdim=True), k_segment/k_segment.norm(dim=-1,keepdim=True)).mean().item()
-                        layer_map.append((i, j, seg, k_similarity))  # Store layer indices, segment index, and similarity
+            # for i in range(32):
+            #     for j in range(32):
+            #         if i >= j:
+            #             continue
+            #         for seg in range(num_segments):  # Only compare segments at the same position
+            #             k_prev_segment = self.hidden_states[i][:, seg*segment_size:(seg+1)*segment_size, :]
+            #             k_segment = self.hidden_states[j][:, seg*segment_size:(seg+1)*segment_size, :]
+            #             # k_prev_segment = self.retained_value_cache[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
+            #             # k_segment = self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :]
+            #             k_similarity = torch.einsum("bsd,bsd->bs", k_prev_segment/k_prev_segment.norm(dim=-1,keepdim=True), k_segment/k_segment.norm(dim=-1,keepdim=True)).mean().item()
+            #             layer_map.append((i, j, seg, k_similarity))  # Store layer indices, segment index, and similarity
         layer_map.sort(key=lambda x:x[-1])
 
         self.key_unit_cache.append(None)
@@ -320,7 +348,8 @@ class DynamicCache(Cache):
         self.mask_v.append(None)
 
 
-        ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx])
+
+        ret_value = (self.retained_key_cache[layer_idx].clone(), self.retained_value_cache[layer_idx].clone(), self.hidden_states[layer_idx].clone())
 
         temp_key = [i.clone() for i in self.retained_key_cache]
         temp_value = [i.clone() for i in self.retained_value_cache]
@@ -328,16 +357,17 @@ class DynamicCache(Cache):
         replaced_segment = set()
         for item in layer_map:
             i, j, seg, _ = item
-            if len(replaced_segment)>=num_segments * 8:
-                break
-            if (j,seg) in used_segment or (j,seg) in replaced_segment or (i,seg) in used_segment:
-                continue
+            # if len(replaced_segment)>=num_segments * 8:
+            #     break
+            # if (j,seg) in used_segment or (j,seg) in replaced_segment or (i,seg) in used_segment:
+            #     continue
             used_segment.add((i,seg))
             replaced_segment.add((j,seg))
             self.retained_key_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_key[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
             self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_value[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
 
         del temp_key, temp_value
+        
         return ret_value[0], ret_value[1], ret_value[2]
     def update_miniCache(
             self,
