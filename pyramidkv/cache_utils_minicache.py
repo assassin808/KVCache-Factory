@@ -296,20 +296,31 @@ class DynamicCache(Cache):
         layer_map = []
 
         if layer_idx == 31:
-            num_segments = 3
-            segment_size = self.retained_key_cache[0].shape[2] // num_segments
+            # Define the segment sizes
+            segment_sizes = [4, 3, 2]  # 4:3:2 ratio
+            total_size = self.retained_key_cache[0].shape[2]
             
+            # Calculate the start and end indices for each segment
+            segment_indices = []
+            start = 0
+            for size in segment_sizes:
+                end = start + size
+                segment_indices.append((start, end))
+                start = end
+            
+            # Iterate over the segments
             for i in range(32):
                 for j in range(32):
                     if i >= j:
                         continue
-                    for seg in range(num_segments):  # Only compare segments at the same position
-                        k_prev_segment = self.hidden_states[i][:, seg*segment_size:(seg+1)*segment_size, :]
-                        k_segment = self.hidden_states[j][:, seg*segment_size:(seg+1)*segment_size, :]
+                    for seg_idx, (seg_start, seg_end) in enumerate(segment_indices):
+                        k_prev_segment = self.hidden_states[i][:, seg_start:seg_end, :]
+                        k_segment = self.hidden_states[j][:, seg_start:seg_end, :]
+                        # Now you can perform your comparison or other operations on these segments
                         # k_prev_segment = self.retained_value_cache[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
                         # k_segment = self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :]
                         k_similarity = torch.einsum("bsd,bsd->bs", k_prev_segment/k_prev_segment.norm(dim=-1,keepdim=True), k_segment/k_segment.norm(dim=-1,keepdim=True)).mean().item()
-                        layer_map.append((i, j, seg, k_similarity))  # Store layer indices, segment index, and similarity
+                        layer_map.append((i, j, seg_idx, k_similarity))  # Store layer indices, segment index, and similarity
         layer_map.sort(key=lambda x:x[-1])
 
         self.key_unit_cache.append(None)
@@ -328,14 +339,17 @@ class DynamicCache(Cache):
         replaced_segment = set()
         for item in layer_map:
             i, j, seg, _ = item
-            if len(replaced_segment)>=num_segments * 8:
+            if len(replaced_segment)>=len(segment_sizes) * 8:
                 break
-            if (j,seg) in used_segment or (j,seg) in replaced_segment or (i,seg) in used_segment:
+            if (j,seg) in used_segment or (j,seg) in replaced_segment or (i,seg) in used_segment or (i,seg) in replaced_segment:
                 continue
             used_segment.add((i,seg))
             replaced_segment.add((j,seg))
-            self.retained_key_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_key[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
-            self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_value[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
+            seg_start, seg_end = segment_indices[seg]
+        
+            # Replace the segments in the cache
+            self.retained_key_cache[j][:, :, seg_start:seg_end, :] = temp_key[i][:, :, seg_start:seg_end, :]
+            self.retained_value_cache[j][:, :, seg_start:seg_end, :] = temp_value[i][:, :, seg_start:seg_end, :]
 
         del temp_key, temp_value
         return ret_value[0], ret_value[1], ret_value[2]
