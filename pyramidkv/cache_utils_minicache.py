@@ -320,7 +320,7 @@ class DynamicCache(Cache):
         self.mask_v.append(None)
 
 
-        ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx])
+        ret_value = (self.retained_key_cache[layer_idx].clone(), self.retained_value_cache[layer_idx].clone(), self.hidden_states[layer_idx].clone())
 
         temp_key = [i.clone() for i in self.retained_key_cache]
         temp_value = [i.clone() for i in self.retained_value_cache]
