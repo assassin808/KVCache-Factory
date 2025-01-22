@@ -179,7 +179,8 @@ if __name__ == '__main__':
                 
                 print(f"dataset {args.dataset} method {args.method} scores {None}")
             if method == 'minicache':
-                print(sum(results_list[-1][1:]))
+                with open("current_result.json", "w") as f:
+                    json.dump(sum(results_list[-1][1:]), f)
 
                 
     # import csv

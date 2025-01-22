@@ -276,7 +276,7 @@ class DynamicCache(Cache):
             layer_idx (`int`):
                 The index of the layer to cache the states for.
             cache_kwargs (`Dict[str, Any]`, `optional`):
-                Additional arguments for the cache subclass. No additional arguments are used in `DynamicCache`.
+                Additional arguments for the cache subclass.
             hidden_states (`torch.Tensor`, `optional`):
                 The hidden states for the layer `layer_idx`.
 
@@ -286,6 +286,7 @@ class DynamicCache(Cache):
         # Update the number of seen tokens
         if layer_idx == 0:
             self._seen_tokens += key_states.shape[-2]
+        
 
         # Update the cache
         assert len(self.retained_key_cache) <= layer_idx
@@ -293,35 +294,18 @@ class DynamicCache(Cache):
         self.retained_value_cache.append(value_states)
         self.hidden_states.append(hidden_states)
 
-        layer_map = []
-
         if layer_idx == 31:
-            # Define the segment sizes
-            segment_sizes = [4, 3, 2]  # 4:3:2 ratio
-            total_size = self.retained_key_cache[0].shape[2]
+            with open("layer_map.json", "r") as f:
+                layer_map = json.load(f)
+            # Remap layers based on layer_map
+            temp_key_cache = self.retained_key_cache
+            temp_value_cache = self.retained_value_cache
+
+            for original_layer, target_layer in layer_map.items():
+                if 0 <= original_layer <= 31 and 0 <= target_layer <= 31:
+                  self.retained_key_cache[original_layer] = temp_key_cache[target_layer]
+                  self.retained_value_cache[original_layer] = temp_value_cache[target_layer]
             
-            # Calculate the start and end indices for each segment
-            segment_indices = []
-            start = 0
-            for size in segment_sizes:
-                end = start + size
-                segment_indices.append((start, end))
-                start = end
-            
-            # Iterate over the segments
-            for i in range(32):
-                for j in range(32):
-                    if i >= j:
-                        continue
-                    for seg_idx, (seg_start, seg_end) in enumerate(segment_indices):
-                        k_prev_segment = self.hidden_states[i][:, seg_start:seg_end, :]
-                        k_segment = self.hidden_states[j][:, seg_start:seg_end, :]
-                        # Now you can perform your comparison or other operations on these segments
-                        # k_prev_segment = self.retained_value_cache[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
-                        # k_segment = self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :]
-                        k_similarity = torch.einsum("bsd,bsd->bs", k_prev_segment/k_prev_segment.norm(dim=-1,keepdim=True), k_segment/k_segment.norm(dim=-1,keepdim=True)).mean().item()
-                        layer_map.append((i, j, seg_idx, k_similarity))  # Store layer indices, segment index, and similarity
-        layer_map.sort(key=lambda x:x[-1])
 
         self.key_unit_cache.append(None)
         self.value_unit_cache.append(None)
@@ -330,28 +314,12 @@ class DynamicCache(Cache):
         self.mask_k.append(None)
         self.mask_v.append(None)
 
+        ret_value = (
+            self.retained_key_cache[layer_idx].clone(),
+            self.retained_value_cache[layer_idx].clone(),
+            None
+        )
 
-        ret_value = (self.retained_key_cache[layer_idx].clone(), self.retained_value_cache[layer_idx].clone(), self.hidden_states[layer_idx].clone())
-
-        temp_key = [i.clone() for i in self.retained_key_cache]
-        temp_value = [i.clone() for i in self.retained_value_cache]
-        used_segment = set()
-        replaced_segment = set()
-        for item in layer_map:
-            i, j, seg, _ = item
-            if len(replaced_segment)>=len(segment_sizes) * 8:
-                break
-            if (j,seg) in used_segment or (j,seg) in replaced_segment or (i,seg) in used_segment or (i,seg) in replaced_segment:
-                continue
-            used_segment.add((i,seg))
-            replaced_segment.add((j,seg))
-            seg_start, seg_end = segment_indices[seg]
-        
-            # Replace the segments in the cache
-            self.retained_key_cache[j][:, :, seg_start:seg_end, :] = temp_key[i][:, :, seg_start:seg_end, :]
-            self.retained_value_cache[j][:, :, seg_start:seg_end, :] = temp_value[i][:, :, seg_start:seg_end, :]
-
-        del temp_key, temp_value
         return ret_value[0], ret_value[1], ret_value[2]
     def update_miniCache(
             self,
