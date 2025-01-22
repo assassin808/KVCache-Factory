@@ -10,6 +10,7 @@ import subprocess
 import time
 
 import run_longbench_BO
+from scipy.optimize import NonlinearConstraint
 
 
 # --- Configuration ---
@@ -120,6 +121,15 @@ def constraints(layer_config):
         return False
 
     return True
+def constraint_function(layer_config):
+    """
+    Constraint function for Bayesian Optimization.
+    """
+    if not constraints(layer_config):
+        return -1000
+    return 0
+
+constra = NonlinearConstraint(constraint_function, -1000, 0)
 
 # --- Modified Objective Function ---
 def objective_function(dic):
@@ -208,6 +218,7 @@ def generate_valid_initial_points(num_points, num_layers, min_reuse_layers):
 # Create a BayesianOptimization object
 optimizer = BayesianOptimization(
     f=None,
+    constraint = constra,
     pbounds=pbounds,
     verbose=2,
 )
