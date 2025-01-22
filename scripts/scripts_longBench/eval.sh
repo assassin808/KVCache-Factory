@@ -10,7 +10,7 @@ model_path="/root/autodl-tmp/models--meta-llama--Llama-2-7b-chat-hf/snapshots/f5
 # nbits=$8 # Quantization bit-width support 8,4,2. Need to set quant_method first.
 save_dir=${source_path}"results_long_bench" # path to result save_dir
 
-python3 run_longbench.py \
+python3 run_longbench_BO.py \
     --method ${method} \
     --model_path ${model_path} \
     --max_capacity_prompts ${max_capacity_prompts} \
