@@ -9,10 +9,10 @@ from tqdm import tqdm
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-datasets = [ "narrativeqa","qasper", "multifieldqa_en",  "hotpotqa", "2wikimqa", "musique", \
-            "gov_report", "qmsum", "multi_news", "trec", "triviaqa", "samsum", \
-            "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
-# datasets = ["narrativeqa"]
+# datasets = [ "narrativeqa","qasper", "multifieldqa_en",  "hotpotqa", "2wikimqa", "musique", \
+#             "gov_report", "qmsum", "multi_news", "trec", "triviaqa", "samsum", \
+#             "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
+datasets = ["narrativeqa"]
 dataset2maxlen = {
     "narrativeqa": 128,
     "qasper": 128,
@@ -102,226 +102,241 @@ def build_chat(prompt):
 #     prompt = f"<<SYS>>\n {SYSTEM_PROMPT} \n<</SYS>>\n\n{prompt}"
 #     return prompt
 
-def main(args):
-    
+from pyramidkv.monkeypatch import replace_llama,replace_mistral
+replace_llama("minicache")
+# replace_mistral(args.method.lower())
 
-    print("Loading data...")
-    
-    test_data = []
-    
-    prompts = []
-    inputs = []
-    contexts = []
-    answerss = []
-    lengths = []
-    datasets = []
-    languages = []
-    all_classess = []
-    _ids = []
-    
-    input_max_len = 0
-    
-    model_path = args.model_path.lower()
+model = AutoModelForCausalLM.from_pretrained(
+    "/root/autodl-tmp/models--meta-llama--Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659",
+    torch_dtype=torch.float16,
+    low_cpu_mem_usage=True,
+    device_map="auto",
+    use_cache=True,
+    attn_implementation="eager"
+)
 
-    
-    for key in model2maxlen:
-        if key in model_path:
-            model_max_len = model2maxlen[key]
-            
+def longbench():
 
-    
-    output_max_len = dataset2maxlen[args.dataset]
-    
-    with open(args.data_file) as fp:
-        temp_list = []
-        for line in fp:
-            temp_list.append(line)
-        # import random
-        # random.shuffle(temp_list)
-        for line in temp_list[:5]:
-            example = json.loads(line)
-            
-            
-            length = example["length"]
-            if length > input_max_len: input_max_len = length
-            
-            template = model2prompt[args.dataset]
-            prompt = template.format(**example)
-            
-            if "llama2" in args.model_path.lower():
-                prompt = build_chat(prompt)
+
+    def main(args):
+        
+
+        print("Loading data...")
+        
+        test_data = []
+        
+        prompts = []
+        inputs = []
+        contexts = []
+        answerss = []
+        lengths = []
+        datasets = []
+        languages = []
+        all_classess = []
+        _ids = []
+        
+        input_max_len = 0
+        
+        model_path = args.model_path.lower()
+
+        
+        for key in model2maxlen:
+            if key in model_path:
+                model_max_len = model2maxlen[key]
                 
-            example["prompt"] = prompt
+
+        
+        output_max_len = dataset2maxlen[args.dataset]
+        
+        with open(args.data_file) as fp:
+            temp_list = []
+            for line in fp:
+                temp_list.append(line)
+            # import random
+            # random.shuffle(temp_list)
+            for line in temp_list[:2]:
+                example = json.loads(line)
                 
-            test_data.append(example)
-        
-    print(f"Max Length is {input_max_len}")
-        
-    if args.max_num_examples and len(test_data) > args.max_num_examples:
-        if args.sample_method == "random":
-            test_data = random.sample(test_data, args.max_num_examples)
-        elif args.sample_method == "topk":
-            test_data = test_data[:args.max_num_examples]
-    
-    
-    for example in test_data:
-        
-        prompts.append(example["prompt"])
-        inputs.append(example["input"])
-        contexts.append(example["context"])
-        answerss.append(example["answers"])
-        lengths.append(example["length"])
-        datasets.append(example["dataset"])
-        languages.append(example["language"])
-        all_classess.append(example["all_classes"])
-        _ids.append(example["_id"])
-
-    print("Finish loading model and tokenizer")
-    
-    model_name = model_path.split("/")[-1]
-
-    os.makedirs(os.path.join(args.save_dir, f"{model_name}_{args.max_capacity_prompts}", args.dataset), exist_ok=True)
-
-    fout = open(os.path.join(args.save_dir, f"{model_name}_{args.max_capacity_prompts}", args.dataset, f"{args.method}.json"), "w")
-     
-    for i in tqdm(range(0, len(prompts), args.eval_batch_size)):
-        
-        batch_prompts = prompts[i:i+args.eval_batch_size]
-        batch_inputs = inputs[i:i+args.eval_batch_size]
-        batch_contexts = contexts[i:i+args.eval_batch_size]
-        batch_answerss = answerss[i:i+args.eval_batch_size]
-        batch_lengths = lengths[i:i+args.eval_batch_size]
-        
-        batch_datasets = datasets[i:i+args.eval_batch_size]
-        batch_languages = languages[i:i+args.eval_batch_size]
-        batch_all_classess = all_classess[i:i+args.eval_batch_size]
-        batch__ids = _ids[i:i+args.eval_batch_size]
-        
-        tokenized_prompts = tokenizer(batch_prompts, padding="longest", return_tensors="pt", add_special_tokens=True).to('cuda')
-        batch_input_ids = tokenized_prompts.input_ids
-        attention_mask = tokenized_prompts.attention_mask
-
-        if len(batch_input_ids[0]) > model_max_len:
-            half = int(model_max_len/2)
-            prompt = tokenizer.decode(batch_input_ids[0][:half], skip_special_tokens=True)+tokenizer.decode(batch_input_ids[0][-half:], skip_special_tokens=True)
+                
+                length = example["length"]
+                if length > input_max_len: input_max_len = length
+                
+                template = model2prompt[args.dataset]
+                prompt = template.format(**example)
+                
+                if "llama2" in args.model_path.lower():
+                    prompt = build_chat(prompt)
+                    
+                example["prompt"] = prompt
+                    
+                test_data.append(example)
             
-            tokenized_prompts = tokenizer(prompt, padding="longest", return_tensors="pt", add_special_tokens=True).to('cuda')
+        print(f"Max Length is {input_max_len}")
+            
+        if args.max_num_examples and len(test_data) > args.max_num_examples:
+            if args.sample_method == "random":
+                test_data = random.sample(test_data, args.max_num_examples)
+            elif args.sample_method == "topk":
+                test_data = test_data[:args.max_num_examples]
+        
+        
+        for example in test_data:
+            
+            prompts.append(example["prompt"])
+            inputs.append(example["input"])
+            contexts.append(example["context"])
+            answerss.append(example["answers"])
+            lengths.append(example["length"])
+            datasets.append(example["dataset"])
+            languages.append(example["language"])
+            all_classess.append(example["all_classes"])
+            _ids.append(example["_id"])
+
+        print("Finish loading model and tokenizer")
+        
+        model_name = model_path.split("/")[-1]
+
+        os.makedirs(os.path.join(args.save_dir, f"{model_name}_{args.max_capacity_prompts}", args.dataset), exist_ok=True)
+
+        fout = open(os.path.join(args.save_dir, f"{model_name}_{args.max_capacity_prompts}", args.dataset, f"{args.method}.json"), "w")
+        
+        for i in tqdm(range(0, len(prompts), args.eval_batch_size)):
+            
+            batch_prompts = prompts[i:i+args.eval_batch_size]
+            batch_inputs = inputs[i:i+args.eval_batch_size]
+            batch_contexts = contexts[i:i+args.eval_batch_size]
+            batch_answerss = answerss[i:i+args.eval_batch_size]
+            batch_lengths = lengths[i:i+args.eval_batch_size]
+            
+            batch_datasets = datasets[i:i+args.eval_batch_size]
+            batch_languages = languages[i:i+args.eval_batch_size]
+            batch_all_classess = all_classess[i:i+args.eval_batch_size]
+            batch__ids = _ids[i:i+args.eval_batch_size]
+            
+            tokenized_prompts = tokenizer(batch_prompts, padding="longest", return_tensors="pt", add_special_tokens=True).to('cuda')
             batch_input_ids = tokenized_prompts.input_ids
             attention_mask = tokenized_prompts.attention_mask
 
-        # # default to True
-        # if args.method == "DynamicKV":
-        #     args.output_attentions = True
-        # else:
-        #     args.output_attentions=False
+            if len(batch_input_ids[0]) > model_max_len:
+                half = int(model_max_len/2)
+                prompt = tokenizer.decode(batch_input_ids[0][:half], skip_special_tokens=True)+tokenizer.decode(batch_input_ids[0][-half:], skip_special_tokens=True)
+                
+                tokenized_prompts = tokenizer(prompt, padding="longest", return_tensors="pt", add_special_tokens=True).to('cuda')
+                batch_input_ids = tokenized_prompts.input_ids
+                attention_mask = tokenized_prompts.attention_mask
 
-        if args.max_capacity_prompts != -1:
-            max_capacity_prompts = args.max_capacity_prompts
-        elif args.max_capacity_prompts_ratio != -1:
-            max_capacity_prompts = round(batch_input_ids.shape[1] * args.max_capacity_prompts_ratio)
+            # # default to True
+            # if args.method == "DynamicKV":
+            #     args.output_attentions = True
+            # else:
+            #     args.output_attentions=False
+
+            if args.max_capacity_prompts != -1:
+                max_capacity_prompts = args.max_capacity_prompts
+            elif args.max_capacity_prompts_ratio != -1:
+                max_capacity_prompts = round(batch_input_ids.shape[1] * args.max_capacity_prompts_ratio)
+            
+            
+            if args.method != "FullKV":
+                if args.method.lower() in ["snapkv","pyramidkv","h2o","cam", "l2norm", "adakv", "headkv", "think", "minicache"]:
+                    window_sizes = 8
+                elif args.method.lower() in ["streamingllm"]:
+                    window_sizes = max_capacity_prompts - 4
+
+                if args.method.lower() =='headkv':
+                    with open(args.head_path, 'r') as file:
+                        head_list = json.loads(file.readline())
+                    head_score_list = [np.mean(l[1]) for l in head_list.items()]
+                    head_score_list = torch.tensor(head_score_list / sum(head_score_list))
+                    total_attention = head_score_list.reshape(model.config.num_hidden_layers, model.config.num_attention_heads)
+                    total_pool_capacity = (args.max_capacity_prompts // args.head_beta) * model.config.num_hidden_layers * model.config.num_attention_heads
+                    min_num = (args.max_capacity_prompts - args.max_capacity_prompts // args.head_beta)
+                    head_capacity = torch.round(total_attention * total_pool_capacity + min_num).int()
+                    model.model.config.head_capacity = head_capacity    
+
+                kernel_sizes = 7
+                pooling = "maxpool"
+                ratio = args.pruning_ratio
+                recent_size = args.recent_size
+
+                layers = len(model.model.layers)
+                # check if window_sizes is a list
+                if not isinstance(window_sizes, list):
+                    window_sizes = [window_sizes] * layers
+                if not isinstance(max_capacity_prompts, list):
+                    max_capacity_prompts = [max_capacity_prompts] * layers
+                if not isinstance(kernel_sizes, list):
+                    kernel_sizes = [kernel_sizes] * layers
+                if not isinstance(ratio, list):
+                    ratio = [ratio] * layers
+                if not isinstance(recent_size, list):
+                    recent_size = [recent_size] * layers
+                for i in range(layers):
+                    model.model.layers[i].self_attn.config.window_size = window_sizes[i]
+                    model.model.layers[i].self_attn.config.max_capacity_prompt = max_capacity_prompts[i]
+                    model.model.layers[i].self_attn.config.kernel_size = kernel_sizes[i]
+                    model.model.layers[i].self_attn.config.pooling = pooling
+                    model.model.layers[i].self_attn.config.merge = args.merge
+                    model.model.layers[i].self_attn.config.floor = args.floor
+                    model.model.layers[i].self_attn.config.ratio = ratio[i]
+                    model.model.layers[i].self_attn.config.recent_size = recent_size[i]
+                
+
+            context_length = batch_input_ids.shape[-1]
+            if args.quant_method == None:        
+                output = model.generate(
+                    **tokenized_prompts,
+                    output_attentions = args.output_attentions,
+                    max_new_tokens=output_max_len,
+                    num_beams=1,
+                    do_sample=False,
+                    temperature=1.0,
+                    min_length=context_length+1,
+                    eos_token_id=[tokenizer.eos_token_id]
+                )
+            else:
+                output = model.generate(
+                    **tokenized_prompts,
+                    output_attentions = args.output_attentions,
+                    max_new_tokens=output_max_len,
+                    num_beams=1,
+                    do_sample=False,
+                    temperature=1.0,
+                    min_length=context_length+1,
+                    eos_token_id=[tokenizer.eos_token_id],
+                    cache_implementation="quantized", 
+                    cache_config={"nbits": args.nbits, "backend": "HQQ","device":"cuda","residual_length":output_max_len,"axis_key":1,"q_group_size":64},
+                )
+
+            batch_outputs =tokenizer.batch_decode([output[0][context_length:]], skip_special_tokens=True)
+            
+            # print(f"debbug batch_outputs {batch_outputs}")
+            
+            batch_generations = batch_outputs
+
+            torch.cuda.empty_cache()
+
+            for j in range(args.eval_batch_size):
+                
+                example = {}
+                
+                example["prompt"] = batch_prompts[j]
+                example["input"] = batch_inputs[j]
+                example["context"] = batch_contexts[j]
+                example["answers"] = batch_answerss[j]
+                example["pred"] = batch_generations[j]
+                example["length"] = batch_lengths[j]
+                
+                example["dataset"] = batch_datasets[j]
+                example["language"] = batch_languages[j]
+                example["all_classes"] = batch_all_classess[j]
+                example["_id"] = batch__ids[j]
+
+                # print(f'{batch_generations[j]}')
+                fout.write(json.dumps(example) + "\n")
         
         
-        if args.method != "FullKV":
-            if args.method.lower() in ["snapkv","pyramidkv","h2o","cam", "l2norm", "adakv", "headkv", "think", "minicache"]:
-                window_sizes = 8
-            elif args.method.lower() in ["streamingllm"]:
-                window_sizes = max_capacity_prompts - 4
 
-            if args.method.lower() =='headkv':
-                with open(args.head_path, 'r') as file:
-                    head_list = json.loads(file.readline())
-                head_score_list = [np.mean(l[1]) for l in head_list.items()]
-                head_score_list = torch.tensor(head_score_list / sum(head_score_list))
-                total_attention = head_score_list.reshape(model.config.num_hidden_layers, model.config.num_attention_heads)
-                total_pool_capacity = (args.max_capacity_prompts // args.head_beta) * model.config.num_hidden_layers * model.config.num_attention_heads
-                min_num = (args.max_capacity_prompts - args.max_capacity_prompts // args.head_beta)
-                head_capacity = torch.round(total_attention * total_pool_capacity + min_num).int()
-                model.model.config.head_capacity = head_capacity    
-
-            kernel_sizes = 7
-            pooling = "maxpool"
-            ratio = args.pruning_ratio
-            recent_size = args.recent_size
-
-            layers = len(model.model.layers)
-            # check if window_sizes is a list
-            if not isinstance(window_sizes, list):
-                window_sizes = [window_sizes] * layers
-            if not isinstance(max_capacity_prompts, list):
-                max_capacity_prompts = [max_capacity_prompts] * layers
-            if not isinstance(kernel_sizes, list):
-                kernel_sizes = [kernel_sizes] * layers
-            if not isinstance(ratio, list):
-                ratio = [ratio] * layers
-            if not isinstance(recent_size, list):
-                recent_size = [recent_size] * layers
-            for i in range(layers):
-                model.model.layers[i].self_attn.config.window_size = window_sizes[i]
-                model.model.layers[i].self_attn.config.max_capacity_prompt = max_capacity_prompts[i]
-                model.model.layers[i].self_attn.config.kernel_size = kernel_sizes[i]
-                model.model.layers[i].self_attn.config.pooling = pooling
-                model.model.layers[i].self_attn.config.merge = args.merge
-                model.model.layers[i].self_attn.config.floor = args.floor
-                model.model.layers[i].self_attn.config.ratio = ratio[i]
-                model.model.layers[i].self_attn.config.recent_size = recent_size[i]
-            
-
-        context_length = batch_input_ids.shape[-1]
-        if args.quant_method == None:        
-            output = model.generate(
-                **tokenized_prompts,
-                output_attentions = args.output_attentions,
-                max_new_tokens=output_max_len,
-                num_beams=1,
-                do_sample=False,
-                temperature=1.0,
-                min_length=context_length+1,
-                eos_token_id=[tokenizer.eos_token_id]
-            )
-        else:
-            output = model.generate(
-                **tokenized_prompts,
-                output_attentions = args.output_attentions,
-                max_new_tokens=output_max_len,
-                num_beams=1,
-                do_sample=False,
-                temperature=1.0,
-                min_length=context_length+1,
-                eos_token_id=[tokenizer.eos_token_id],
-                cache_implementation="quantized", 
-                cache_config={"nbits": args.nbits, "backend": "HQQ","device":"cuda","residual_length":output_max_len,"axis_key":1,"q_group_size":64},
-            )
-
-        batch_outputs =tokenizer.batch_decode([output[0][context_length:]], skip_special_tokens=True)
-        
-        # print(f"debbug batch_outputs {batch_outputs}")
-        
-        batch_generations = batch_outputs
-
-        torch.cuda.empty_cache()
-
-        for j in range(args.eval_batch_size):
-            
-            example = {}
-            
-            example["prompt"] = batch_prompts[j]
-            example["input"] = batch_inputs[j]
-            example["context"] = batch_contexts[j]
-            example["answers"] = batch_answerss[j]
-            example["pred"] = batch_generations[j]
-            example["length"] = batch_lengths[j]
-            
-            example["dataset"] = batch_datasets[j]
-            example["language"] = batch_languages[j]
-            example["all_classes"] = batch_all_classess[j]
-            example["_id"] = batch__ids[j]
-
-            # print(f'{batch_generations[j]}')
-            fout.write(json.dumps(example) + "\n")
-    
-    
-
-if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     
@@ -329,10 +344,10 @@ if __name__ == "__main__":
     parser.add_argument("--base_dir", type=str, default="")
     parser.add_argument("--dataset", type=str, default="")
     parser.add_argument("--data_file", type=str, default="")
-    parser.add_argument("--save_dir", type=str, default="")
+    parser.add_argument("--save_dir", type=str, default="./results_long_bench")
 
     parser.add_argument("--model_name", type=str, default=None, help="if specified, we will load the model to generate the predictions.")
-    parser.add_argument("--model_path", type=str, default=None, help="if specified, we will load the model to generate the predictions.")
+    parser.add_argument("--model_path", type=str, default="/root/autodl-tmp/models--meta-llama--Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659", help="if specified, we will load the model to generate the predictions.")
     parser.add_argument("--use_fast_tokenizer", type=bool, default=True, help="")
     parser.add_argument("--output_attentions", type=bool, default=False, help="")
     
@@ -344,8 +359,8 @@ if __name__ == "__main__":
     parser.add_argument("--eval_batch_size", type=int, default=1, help="batch size for evaluation.")
     
     parser.add_argument("--use_cache", type=bool, default=True, help="")
-    parser.add_argument("--attn_implementation", type=str,  default="flash_attention_2", choices=["flash_attention_2", "sdpa", "eager"])
-    parser.add_argument("--method", type=str,  default=None)
+    parser.add_argument("--attn_implementation", type=str,  default="eager", choices=["flash_attention_2", "sdpa", "eager"])
+    parser.add_argument("--method", type=str,  default="minicache")
     parser.add_argument("--quant_method",type=str,default=None,choices=["kivi","kvquant"])
     parser.add_argument("--nbits", type=int, default=8, help="")
     parser.add_argument("--max_capacity_prompts", type=int, default=512, help="")
@@ -384,18 +399,7 @@ if __name__ == "__main__":
     )
 
 
-    from pyramidkv.monkeypatch import replace_llama,replace_mistral
-    replace_llama(args.method.lower())
-    replace_mistral(args.method.lower())
-    
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path,
-        torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
-        device_map="auto",
-        use_cache=args.use_cache,
-        attn_implementation=args.attn_implementation
-    )
+   
         
 
     tokenizer.padding_side = "left"

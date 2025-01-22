@@ -183,7 +183,7 @@ if __name__ == '__main__':
                     json.dump(sum(results_list[-1][1:]), f)
 
                 
-    # import csv
-    # with open(os.path.join(args.results_dir,f"results.csv"), 'w') as fp:
-    #     writer = csv.writer(fp)
-    #     writer.writerows(results_list)
+    import csv
+    with open(os.path.join(args.results_dir,f"results.csv"), 'w') as fp:
+        writer = csv.writer(fp)
+        writer.writerows(results_list)

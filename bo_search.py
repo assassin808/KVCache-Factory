@@ -9,6 +9,7 @@ import argparse
 import subprocess
 import time
 
+import run_longbench_BO
 
 
 # --- Configuration ---
@@ -26,6 +27,8 @@ def layers_to_remap(layers_config):
     A dictionary where keys are original layer indices and values are the 
     target layer indices (after remapping).
   """
+  if type(layers_config) == type({1:1}):
+    return layers_config
   remap = {}
   for i, target in enumerate(layers_config):
     remap[i] = int(target)  # Ensure integer values
@@ -68,25 +71,19 @@ def calculate_memory_usage(remap):
 
 def run_eval_sh():
     print('run_eval_sh')
-    try:
+    run_longbench_BO.longbench()
         # Run the script
-        completed_process = subprocess.run(
-            ["bash", "scripts/scripts_longBench/eval.sh"],  # Use "bash" to execute the script
-            text=True,  # Decode output as text
-            check=True  # Raise an exception if the script fails
-        )
-    except subprocess.CalledProcessError as e:
-        # Script failed
-        print(f"Error running script: {e}")
-        print(f"Return code: {e.returncode}")
-        print(f"Stdout: {e.stdout}")
-        print(f"Stderr: {e.stderr}")
+        # completed_process = subprocess.run(
+        #     ["bash", "scripts/scripts_longBench/eval.sh"],  # Use "bash" to execute the script
+        #     text=True,  # Decode output as text
+        #     check=True  # Raise an exception if the script fails
+        # )
 
 def run_metrics_sh():
     print('run_metrics_sh')
     try:
         completed_process = subprocess.run(
-            ["bash", "scripts/scripts_longBench/metrics.sh", "results_long_bench/0e9e39f249a16976918f6564b8830bc894c89659_2048"],  # Use "bash" to execute the script
+            ["bash", "scripts/scripts_longBench/metrics.sh", "results_long_bench/0e9e39f249a16976918f6564b8830bc894c89659_512"],  # Use "bash" to execute the script
             text=True,  # Decode output as text
             check=True  # Raise an exception if the script fails
         )
@@ -125,25 +122,28 @@ def constraints(layer_config):
     return True
 
 # --- Modified Objective Function ---
-def objective_function(**kwargs):
+def objective_function(dic):
     """
     Objective function for Bayesian Optimization.
     """
     # Convert kwargs to a list format for easier handling
-    layers_config = [int(kwargs[f'layer{i}']) for i in range(NUM_LAYERS)]
+    layers_config = [int(dic[f'layer{i}']) for i in range(NUM_LAYERS)]
 
     layer_map_filepath = "layer_map.json"
     with open(layer_map_filepath, "w") as f:
         json.dump(layers_to_remap(layers_config), f)
 
     # Run the eval and metrics scripts
-    # run_eval_sh()
-    # run_metrics_sh()
+    if not constraints(layers_config):
+        return -1000
+    run_eval_sh()
+    run_metrics_sh()
 
     # Evaluate performance
-    # score = evaluate_llm_performance(layers_to_remap(layers_config))
-    import random
-    score = random.random()
+    score = evaluate_llm_performance(layers_to_remap(layers_config))
+    # import random
+    # score = random.random()
+    # print(layers_config)
     return score
 
 # --- Bayesian Optimization with Constraint Enforcement ---
@@ -152,13 +152,13 @@ def objective_function(**kwargs):
 pbounds = {f'layer{i}': (0, i) for i in range(NUM_LAYERS)}
 
 # Create a custom utility function with constraints
-def constrained_utility(x, gp, y_max):
+def constrained_utility(x, x_dict, gp, y_max):
     """
     Constrained utility function for Bayesian Optimization.
     """
-    layer_config = [int(val) for val in x[0]]
+    layer_config = {i:int(x_dict[i]) for i in x_dict.keys()}
     if not constraints(layer_config):
-        return 0  # Return 0 if constraints are not met
+        return -1000  # Return 0 if constraints are not met
 
     return util.ucb(x, gp, 0.1)  # Use UCB as the base utility function
 
@@ -210,41 +210,44 @@ optimizer = BayesianOptimization(
     f=None,
     pbounds=pbounds,
     verbose=2,
-    random_state=1,
 )
-logger = JSONLogger(path="./logs.json")
+logger = JSONLogger(path="./logs_.json")
 
 optimizer.subscribe(Events.OPTIMIZATION_STEP, logger)
 # Create a TargetSpace object
 space = TargetSpace(target_func=dummy_target_func, pbounds=pbounds, random_state=1)
 
 # --- Generate and Register Valid Initial Points ---
-initial_points = generate_valid_initial_points(num_points=8, num_layers=NUM_LAYERS, min_reuse_layers=MIN_REUSE_LAYERS)
+initial_points = generate_valid_initial_points(num_points=1, num_layers=NUM_LAYERS, min_reuse_layers=MIN_REUSE_LAYERS)
 for layer_config in initial_points:
-    x_probe = np.array(layer_config)
-    y_probe = objective_function(**{f'layer{i}': layer_config[i] for i in range(NUM_LAYERS)})
-    optimizer.register(params=x_probe, target=y_probe)
-
+    y_probe = objective_function({f'layer{i}': layer_config[i] for i in range(NUM_LAYERS)})
+    optimizer.register(params={f'layer{i}': layer_config[i] for i in range(NUM_LAYERS)}, target=y_probe)
 # --- Optimization Process ---
 
-
-for _ in range(3):
+counter = 0
+while counter < 20:
     x_probe = optimizer.space.random_sample()
+    variable_names = optimizer.space.keys
+    x_dict = dict(zip(variable_names, x_probe))
+    # print(x_probe)
     
     # Ensure the suggestion is a numpy array of the correct shape
     x_probe = x_probe.reshape(1, -1)
     
     # Predict the utility of the new point
-    y_probe = constrained_utility(x_probe, optimizer._gp, optimizer._space.target.max())
+    y_probe = constrained_utility(x_probe, x_dict, optimizer._gp, optimizer._space.target.max())
     
     # Format x_probe to be a dictionary for the objective function
-    x_probe_dict = {f'layer{i}': int(x_probe[0][i]) for i in range(NUM_LAYERS)}
+    x_probe_dict = x_dict
     
     # Evaluate the objective function for the new point
-    y_actual = objective_function(**x_probe_dict)
+    y_actual = objective_function(x_probe_dict)
+    if y_actual > -100 :
+        counter+=1
     
     # Register the new point with the observed value
-    optimizer.register(params=x_probe[0], target=y_actual)
+    # print(x_probe[0])
+    optimizer.register(params=x_probe_dict, target=y_actual)
 
 # --- Results ---
 print("Best remapping configuration found:")
