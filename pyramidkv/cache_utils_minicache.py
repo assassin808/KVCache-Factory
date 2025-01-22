@@ -302,9 +302,9 @@ class DynamicCache(Cache):
             temp_value_cache = self.retained_value_cache
 
             for original_layer, target_layer in layer_map.items():
-                if 0 <= original_layer <= 31 and 0 <= target_layer <= 31:
-                  self.retained_key_cache[original_layer] = temp_key_cache[target_layer]
-                  self.retained_value_cache[original_layer] = temp_value_cache[target_layer]
+                if 0 <= int(original_layer) <= 31 and 0 <= int(target_layer) <= 31:
+                  self.retained_key_cache[int(original_layer)] = temp_key_cache[int(target_layer)]
+                  self.retained_value_cache[int(original_layer)] = temp_value_cache[int(target_layer)]
             
 
         self.key_unit_cache.append(None)

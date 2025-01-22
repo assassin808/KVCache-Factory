@@ -1,86 +1,14 @@
-from bayes_opt import BayesianOptimization
+from bayes_opt import BayesianOptimization, util  # Import util
+from bayes_opt.target_space import TargetSpace
+from bayes_opt.event import Events
+from bayes_opt.logger import JSONLogger
 import numpy as np
-import os
-import json
-
 import os
 import json
 import argparse
-import numpy as np
-
 import subprocess
 import time
 
-from metrics import (
-    qa_f1_score,
-    rouge_zh_score,
-    qa_f1_zh_score,
-    rouge_score,
-    classification_score,
-    retrieval_score,
-    retrieval_zh_score,
-    count_score,
-    code_sim_score,
-)
-
-dataset2metric = {
-    "narrativeqa": qa_f1_score,
-    "qasper": qa_f1_score,
-    "multifieldqa_en": qa_f1_score,
-    "multifieldqa_zh": qa_f1_zh_score,
-    "hotpotqa": qa_f1_score,
-    "2wikimqa": qa_f1_score,
-    "musique": qa_f1_score,
-    "dureader": rouge_zh_score,
-    "gov_report": rouge_score,
-    "qmsum": rouge_score,
-    "multi_news": rouge_score,
-    "vcsum": rouge_zh_score,
-    "trec": classification_score,
-    "triviaqa": qa_f1_score,
-    "samsum": rouge_score,
-    "lsht": classification_score,
-    "passage_retrieval_en": retrieval_score,
-    "passage_count": count_score,
-    "passage_retrieval_zh": retrieval_zh_score,
-    "lcc": code_sim_score,
-    "repobench-p": code_sim_score,
-}
-
-def parse_args(args=None):
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--results_dir', type=str, default=None)
-    parser.add_argument('--longbench_e', action='store_true', help="Evaluate on LongBench-E")
-    return parser.parse_args(args)
-
-def scorer_e(dataset, predictions, answers, lengths, all_classes):
-    scores = {"0-4k": [], "4-8k": [], "8k+": []}
-    for (prediction, ground_truths, length) in zip(predictions, answers, lengths):
-        score = 0.
-        if dataset in ["trec", "triviaqa", "samsum", "lsht"]:
-            prediction = prediction.lstrip('\n').split('\n')[0]
-        for ground_truth in ground_truths:
-            score = max(score, dataset2metric[dataset](prediction, ground_truth, all_classes=all_classes))
-        if length < 4000:
-            scores["0-4k"].append(score)
-        elif length < 8000:
-            scores["4-8k"].append(score)
-        else:
-            scores["8k+"].append(score)
-    for key in scores.keys():
-        scores[key] = round(100 * np.mean(scores[key]), 2)
-    return scores
-
-def scorer(dataset, predictions, answers, all_classes):
-    total_score = 0.
-    for (prediction, ground_truths) in zip(predictions, answers):
-        score = 0.
-        if dataset in ["trec", "triviaqa", "samsum", "lsht"]:
-            prediction = prediction.lstrip('\n').split('\n')[0]
-        for ground_truth in ground_truths:
-            score = max(score, dataset2metric[dataset](prediction, ground_truth, all_classes=all_classes))
-        total_score += score
-    return round(100 * total_score / len(predictions), 2)
 
 
 # --- Configuration ---
@@ -139,11 +67,11 @@ def calculate_memory_usage(remap):
     return len(set(remap.values()))
 
 def run_eval_sh():
+    print('run_eval_sh')
     try:
         # Run the script
         completed_process = subprocess.run(
             ["bash", "scripts/scripts_longBench/eval.sh"],  # Use "bash" to execute the script
-            capture_output=True,  # Capture stdout and stderr
             text=True,  # Decode output as text
             check=True  # Raise an exception if the script fails
         )
@@ -155,10 +83,10 @@ def run_eval_sh():
         print(f"Stderr: {e.stderr}")
 
 def run_metrics_sh():
+    print('run_metrics_sh')
     try:
         completed_process = subprocess.run(
-            ["bash", "scripts/scripts_longBench/metrics.sh [placeholders]"],  # Use "bash" to execute the script
-            capture_output=True,  # Capture stdout and stderr
+            ["bash", "scripts/scripts_longBench/metrics.sh", "results_long_bench/0e9e39f249a16976918f6564b8830bc894c89659_2048"],  # Use "bash" to execute the script
             text=True,  # Decode output as text
             check=True  # Raise an exception if the script fails
         )
@@ -174,55 +102,149 @@ def evaluate_llm_performance(remap):
         result = json.load(f)
     return float(result)
 
-# --- Objective Function for Bayesian Optimization ---
+def constraints(layer_config):
+    """
+    Checks if a layer configuration is valid based on the constraints.
+    """
+    remap = layers_to_remap(layer_config)
+    
+    used_targets = set()
+    for i, target in enumerate(remap.values()):
+        if target < 0 or target >= NUM_LAYERS:
+            return False
+        if target > i:
+            return False
+        if target in used_targets:
+            return False
+        if target != i:
+            used_targets.add(i)
+
+    if len(set(remap.values())) > NUM_LAYERS - MIN_REUSE_LAYERS:
+        return False
+
+    return True
+
+# --- Modified Objective Function ---
 def objective_function(**kwargs):
     """
-    Objective function for the Bayesian Optimization process.
-
-    Args:
-        **kwargs: Keyword arguments representing the layer configuration,
-                  e.g., layer0, layer1, ..., layer15.
-
-    Returns:
-        The negative LLM performance score (since BayesianOptimization minimizes).
+    Objective function for Bayesian Optimization.
     """
-    layers_config = [kwargs[f'layer{i}'] for i in range(NUM_LAYERS)]
-    remap = layers_to_remap(layers_config)
+    # Convert kwargs to a list format for easier handling
+    layers_config = [int(kwargs[f'layer{i}']) for i in range(NUM_LAYERS)]
 
-    if not is_valid_remap(remap):
-        return -1000  # Return a very low score for invalid mappings
-
-    layer_map_filepath = "layer_map.json"  # Or any path you prefer
+    layer_map_filepath = "layer_map.json"
     with open(layer_map_filepath, "w") as f:
-        json.dump(remap, f)
+        json.dump(layers_to_remap(layers_config), f)
 
-    # Run the eval script
-    run_eval_sh()
-    # Run the metrics script
-    run_metrics_sh()
-    # Evaluate the LLM performance
-    score = evaluate_llm_performance(remap)
+    # Run the eval and metrics scripts
+    # run_eval_sh()
+    # run_metrics_sh()
+
+    # Evaluate performance
+    # score = evaluate_llm_performance(layers_to_remap(layers_config))
+    import random
+    score = random.random()
     return score
 
-# --- Bayesian Optimization Setup ---
-# Define the bounds for each layer (each layer can map to itself or a previous layer)
-pbounds = {}
-for i in range(NUM_LAYERS):
-    pbounds[f'layer{i}'] = (0, i) 
+# --- Bayesian Optimization with Constraint Enforcement ---
+
+# Define the parameter bounds
+pbounds = {f'layer{i}': (0, i) for i in range(NUM_LAYERS)}
+
+# Create a custom utility function with constraints
+def constrained_utility(x, gp, y_max):
+    """
+    Constrained utility function for Bayesian Optimization.
+    """
+    layer_config = [int(val) for val in x[0]]
+    if not constraints(layer_config):
+        return 0  # Return 0 if constraints are not met
+
+    return util.ucb(x, gp, 0.1)  # Use UCB as the base utility function
+
+# Create a BayesianOptimization object
+def dummy_target_func(**kwargs):
+  """
+  A dummy target function that is not actually used.
+  """
+  return 0
+
+# --- Function to Generate Valid Initial Points ---
+def generate_valid_initial_points(num_points, num_layers, min_reuse_layers):
+    """
+    Generates valid initial points for the Bayesian Optimization.
+
+    Args:
+        num_points: The number of initial points to generate.
+        num_layers: The total number of layers.
+        min_reuse_layers: The minimum number of layers to reuse.
+
+    Returns:
+        A list of valid initial points (layer configurations).
+    """
+    valid_points = []
+    while len(valid_points) < num_points:
+        layer_config = list(range(num_layers))  # Start with a default configuration
+
+        # Determine the number of layers to reuse (randomly choose between min_reuse_layers and num_layers)
+        num_layers_to_reuse = np.random.randint(min_reuse_layers, num_layers)
+        # Randomly select layers to be replaced
+        layers_to_replace = np.random.choice(
+            range(num_layers), size=num_layers - num_layers_to_reuse, replace=False
+        )
+
+        # Replace the selected layers with valid alternatives
+        for layer_index in layers_to_replace:
+            valid_targets = list(range(layer_index + 1))
+            layer_config[layer_index] = np.random.choice(valid_targets)
+
+        # Check if the generated configuration is valid
+        # print(len(layer_config))
+        if constraints(layer_config):
+            valid_points.append(layer_config)
+
+    return valid_points
 
 # Create a BayesianOptimization object
 optimizer = BayesianOptimization(
-    f=objective_function,
+    f=None,
     pbounds=pbounds,
+    verbose=2,
     random_state=1,
-    verbose=2  # 2: Prints all results, 1: Prints only when a maximum is observed, 0: No output
 )
+logger = JSONLogger(path="./logs.json")
+
+optimizer.subscribe(Events.OPTIMIZATION_STEP, logger)
+# Create a TargetSpace object
+space = TargetSpace(target_func=dummy_target_func, pbounds=pbounds, random_state=1)
+
+# --- Generate and Register Valid Initial Points ---
+initial_points = generate_valid_initial_points(num_points=8, num_layers=NUM_LAYERS, min_reuse_layers=MIN_REUSE_LAYERS)
+for layer_config in initial_points:
+    x_probe = np.array(layer_config)
+    y_probe = objective_function(**{f'layer{i}': layer_config[i] for i in range(NUM_LAYERS)})
+    optimizer.register(params=x_probe, target=y_probe)
 
 # --- Optimization Process ---
-optimizer.maximize(
-    init_points=1,  # Number of initial random tests before Bayesian Optimization starts
-    n_iter=1,      # Number of iterations of Bayesian Optimization
-)
+
+
+for _ in range(3):
+    x_probe = optimizer.space.random_sample()
+    
+    # Ensure the suggestion is a numpy array of the correct shape
+    x_probe = x_probe.reshape(1, -1)
+    
+    # Predict the utility of the new point
+    y_probe = constrained_utility(x_probe, optimizer._gp, optimizer._space.target.max())
+    
+    # Format x_probe to be a dictionary for the objective function
+    x_probe_dict = {f'layer{i}': int(x_probe[0][i]) for i in range(NUM_LAYERS)}
+    
+    # Evaluate the objective function for the new point
+    y_actual = objective_function(**x_probe_dict)
+    
+    # Register the new point with the observed value
+    optimizer.register(params=x_probe[0], target=y_actual)
 
 # --- Results ---
 print("Best remapping configuration found:")
