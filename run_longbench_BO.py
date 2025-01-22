@@ -136,9 +136,9 @@ def main(args):
         temp_list = []
         for line in fp:
             temp_list.append(line)
-        import random
-        random.shuffle(temp_list)
-        for line in temp_list[:4]:
+        # import random
+        # random.shuffle(temp_list)
+        for line in temp_list[:5]:
             example = json.loads(line)
             
             

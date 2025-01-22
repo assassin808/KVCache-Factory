@@ -295,16 +295,27 @@ class DynamicCache(Cache):
         self.hidden_states.append(hidden_states)
 
         if layer_idx == 31:
-            with open("layer_map.json", "r") as f:
-                layer_map = json.load(f)
-            # Remap layers based on layer_map
-            temp_key_cache = self.retained_key_cache
-            temp_value_cache = self.retained_value_cache
+            import os
+            files = os.listdir('KVfolder')
+            kv_files = [f for f in files if f.startswith('kv') and f.endswith('.pt')]
+            # Extract the numbers from the filenames
+            numbers = [int(f[2:-3]) for f in kv_files]
 
-            for original_layer, target_layer in layer_map.items():
-                if 0 <= int(original_layer) <= 31 and 0 <= int(target_layer) <= 31:
-                  self.retained_key_cache[int(original_layer)] = temp_key_cache[int(target_layer)]
-                  self.retained_value_cache[int(original_layer)] = temp_value_cache[int(target_layer)]
+            # Determine the next available number
+            next_num = max(numbers) + 1 if len(numbers)!=0 else 1
+            next_filename = f'kv{next_num}.pt'
+            torch.save(current_tensor, os.path.join('KVfolder', next_filename))
+
+            # with open("layer_map.json", "r") as f:
+            #     layer_map = json.load(f)
+            # # Remap layers based on layer_map
+            # temp_key_cache = self.retained_key_cache
+            # temp_value_cache = self.retained_value_cache
+
+            # for original_layer, target_layer in layer_map.items():
+            #     if 0 <= int(original_layer) <= 31 and 0 <= int(target_layer) <= 31:
+            #       self.retained_key_cache[int(original_layer)] = temp_key_cache[int(target_layer)]
+            #       self.retained_value_cache[int(original_layer)] = temp_value_cache[int(target_layer)]
             
 
         self.key_unit_cache.append(None)
