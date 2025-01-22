@@ -220,8 +220,8 @@ optimizer = BayesianOptimization(
 
 # --- Optimization Process ---
 optimizer.maximize(
-    init_points=10,  # Number of initial random tests before Bayesian Optimization starts
-    n_iter=50,      # Number of iterations of Bayesian Optimization
+    init_points=1,  # Number of initial random tests before Bayesian Optimization starts
+    n_iter=1,      # Number of iterations of Bayesian Optimization
 )
 
 # --- Results ---
