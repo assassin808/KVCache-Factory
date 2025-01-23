@@ -12,44 +12,44 @@ from bayes_opt import UtilityFunction
 from bayes_opt.util import load_logs
 import os  # Import the 'os' module
 
-
 import run_longbench_BO
 from scipy.optimize import NonlinearConstraint
+
 utility_function = UtilityFunction(kind="ucb", kappa=0.1, xi=0.0)
+
 # --- Configuration ---
 NUM_LAYERS = 32
-NUM_MODIFIABLE_LAYERS = 16  # We're now modifying 16 layers
-NUM_REPLACED_LAYERS = 8 # we choose 8 layers to be replaced from last 16 layers
-NUM_REUSE_LAYERS = 8 # we choose 8 layers to replace those 8 layers from first 16 layers
-# MIN_REUSE_LAYERS = 8 - NUM_MODIFIABLE_LAYERS
+REUSE_LAYER = 2  # Index of the layer to be reused
+REPLACED_LAYERS_START = 3  # Start index for layers to be replaced
+REPLACED_LAYERS_END = 32  # End index for layers to be replaced (exclusive)
+NUM_REPLACED_LAYERS = 8  # Number of layers to be replaced
 
 # --- Helper Functions ---
 def layers_to_remap(layers_config):
     """Converts a list of layer configurations to a remap dictionary.
 
     Args:
-        layers_config: A dictionary representing the target layer for each modifiable layer, 
-                       split into two parts: replaced layers and reuse layers.
+        layers_config: A dictionary representing the target layer for each modifiable layer,
+                       specifically indicating which layers are replaced.
 
     Returns:
-        A dictionary where keys are original layer indices and values are the 
+        A dictionary where keys are original layer indices and values are the
         target layer indices (after remapping).
     """
     remap = {}
 
-    # Identity mapping for the first 16 layers
-    for i in range(NUM_LAYERS - NUM_MODIFIABLE_LAYERS):
+    # Identity mapping for layers outside the replaced range
+    for i in range(0, REPLACED_LAYERS_START):
         remap[i] = i
 
-    # Mapping for the modifiable layers
+    # Mapping for the replaced layers
     replaced_layers = layers_config['replaced_layers']
-    reuse_layers = layers_config['reuse_layers']
-    
-    replaced_indices = sorted(replaced_layers.keys())
+    for layer_index in replaced_layers:
+        remap[layer_index] = REUSE_LAYER
 
-    
-    for i, target_index in enumerate(replaced_indices):
-        remap[target_index] = reuse_layers[i]
+    # Identity mapping for layers after the replaced range
+    for i in range(REPLACED_LAYERS_END, NUM_LAYERS):
+        remap[i] = i
 
     return remap
 
@@ -57,26 +57,12 @@ def constraints(layer_config):
     """
     Checks if a layer configuration is valid based on the constraints.
     """
-    remap = layers_to_remap(layer_config)
-    
-    # Check for out-of-bounds targets and targets greater than the current layer
-    for i, target in remap.items():
-        if target < 0 or target >= NUM_LAYERS:
-            return False
-        if target > i:
-            return False
-
     # Check that the replaced layers are unique and within the correct range
     replaced_layers = layer_config['replaced_layers']
-    if len(set(replaced_layers.values())) != NUM_REPLACED_LAYERS:
+    if len(set(replaced_layers)) != NUM_REPLACED_LAYERS:
         return False
-    for layer_index in replaced_layers.values():
-        if layer_index < NUM_LAYERS - NUM_MODIFIABLE_LAYERS or layer_index >= NUM_LAYERS:
-            return False
-    
-    reuse_layers = layer_config['reuse_layers']
-    for layer_index in reuse_layers:
-        if layer_index < 0 or layer_index >= NUM_LAYERS - NUM_MODIFIABLE_LAYERS:
+    for layer_index in replaced_layers:
+        if layer_index < REPLACED_LAYERS_START or layer_index >= REPLACED_LAYERS_END:
             return False
 
     return True
@@ -139,14 +125,13 @@ def objective_function(dic):
     """
     # Convert kwargs to a dictionary format for easier handling
     layers_config = {
-        'replaced_layers': {int(dic[f'replaced_layer{i}']):int(dic[f'replaced_layer{i}']) for i in range(NUM_REPLACED_LAYERS)},
-        'reuse_layers': [int(dic[f'reuse_layer{i}']) for i in range(NUM_REUSE_LAYERS)]
+        'replaced_layers': [int(dic[f'replaced_layer{i}']) for i in range(NUM_REPLACED_LAYERS)],
     }
 
     layer_map_filepath = "layer_map.json"
     with open(layer_map_filepath, "w") as f:
         json.dump(layers_to_remap(layers_config), f)
-    
+
     if not constraints(layers_config):
         return -1000
 
@@ -163,8 +148,7 @@ def objective_function(dic):
 
 # Define the parameter bounds
 pbounds = {}
-pbounds.update({f'replaced_layer{i}': (NUM_LAYERS - NUM_MODIFIABLE_LAYERS, NUM_LAYERS -1) for i in range(NUM_REPLACED_LAYERS)})
-pbounds.update({f'reuse_layer{i}': (0, NUM_LAYERS - NUM_MODIFIABLE_LAYERS - 1) for i in range(NUM_REUSE_LAYERS)})
+pbounds.update({f'replaced_layer{i}': (REPLACED_LAYERS_START, REPLACED_LAYERS_END - 1) for i in range(NUM_REPLACED_LAYERS)})
 
 # Create a custom utility function with constraints
 def constrained_utility(x, x_dict, gp, y_max):
@@ -172,53 +156,44 @@ def constrained_utility(x, x_dict, gp, y_max):
     Constrained utility function for Bayesian Optimization.
     """
     layer_config = {
-        'replaced_layers': {int(x_dict[f'replaced_layer{i}']):int(x_dict[f'replaced_layer{i}']) for i in range(NUM_REPLACED_LAYERS)},
-        'reuse_layers': [int(x_dict[f'reuse_layer{i}']) for i in range(NUM_REUSE_LAYERS)]
+        'replaced_layers': [int(x_dict[f'replaced_layer{i}']) for i in range(NUM_REPLACED_LAYERS)],
     }
     if not constraints(layer_config):
-        return -1000  # Return 0 if constraints are not met
+        return -1000
 
-    return utility_function.utility(x, gp, y_max)  # Use UCB as the base utility function
+    return utility_function.utility(x, gp, y_max)
 
 # Create a BayesianOptimization object
 def dummy_target_func(**kwargs):
-  """
-  A dummy target function that is not actually used.
-  """
-  return 0
+    """
+    A dummy target function that is not actually used.
+    """
+    return 0
 
 # --- Function to Generate Valid Initial Points ---
-def generate_valid_initial_points(num_points, num_layers, num_modifiable_layers, num_replaced_layers, num_reuse_layers):
+def generate_valid_initial_points(num_points, num_layers, num_replaced_layers):
     """
     Generates valid initial points for the Bayesian Optimization.
 
     Args:
         num_points: The number of initial points to generate.
         num_layers: The total number of layers.
-        num_modifiable_layers: The number of layers that can be modified.
         num_replaced_layers: The number of layers to be replaced.
-        num_reuse_layers: The number of layers to be reused.
 
     Returns:
         A list of valid initial points (configurations for modifiable layers).
     """
     valid_points = []
     while len(valid_points) < num_points:
-        # Randomly select layers to be replaced from the last 16 layers
+        # Randomly select layers to be replaced
         replaced_layers = np.random.choice(
-            range(num_layers - num_modifiable_layers, num_layers), size=num_replaced_layers, replace=False
+            range(REPLACED_LAYERS_START, REPLACED_LAYERS_END), size=num_replaced_layers, replace=False
         )
-        
-        # Randomly select layers to reuse from the first 16 layers
-        reuse_layers = np.random.choice(
-            range(num_layers - num_modifiable_layers), size=num_reuse_layers, replace=True
-        )
-        
+
         layer_config = {
-            'replaced_layers': {layer: layer for layer in replaced_layers},
-            'reuse_layers': list(reuse_layers)
+            'replaced_layers': list(replaced_layers),
         }
-        
+
         if constraints(layer_config):
             valid_points.append(layer_config)
 
@@ -227,7 +202,7 @@ def generate_valid_initial_points(num_points, num_layers, num_modifiable_layers,
 # Create a BayesianOptimization object
 optimizer = BayesianOptimization(
     f=None,
-    constraint = constra,
+    constraint=constra,
     pbounds=pbounds,
     verbose=2,
 )
@@ -247,11 +222,11 @@ optimizer.subscribe(Events.OPTIMIZATION_STEP, logger)
 space = TargetSpace(target_func=dummy_target_func, pbounds=pbounds, random_state=1)
 
 # --- Generate and Register Valid Initial Points ---
-initial_points = generate_valid_initial_points(num_points=8, num_layers=NUM_LAYERS, num_modifiable_layers=NUM_MODIFIABLE_LAYERS, num_replaced_layers=NUM_REPLACED_LAYERS, num_reuse_layers=NUM_REUSE_LAYERS)
+initial_points = generate_valid_initial_points(num_points=8, num_layers=NUM_LAYERS, num_replaced_layers=NUM_REPLACED_LAYERS)
 for layer_config in initial_points:
-    y_probe = objective_function({**{f'replaced_layer{i}': layer_config['replaced_layers'][sorted(list(layer_config['replaced_layers'].keys()))[i]] for i in range(NUM_REPLACED_LAYERS)}, **{f'reuse_layer{i}': layer_config['reuse_layers'][i] for i in range(NUM_REUSE_LAYERS)}})
-    optimizer.register(params={**{f'replaced_layer{i}': layer_config['replaced_layers'][sorted(list(layer_config['replaced_layers'].keys()))[i]] for i in range(NUM_REPLACED_LAYERS)}, **{f'reuse_layer{i}': layer_config['reuse_layers'][i] for i in range(NUM_REUSE_LAYERS)}}, target=y_probe, constraint_value=constraint_function(layer_config))
-    
+    y_probe = objective_function({f'replaced_layer{i}': layer_config['replaced_layers'][i] for i in range(NUM_REPLACED_LAYERS)})
+    optimizer.register(params={f'replaced_layer{i}': layer_config['replaced_layers'][i] for i in range(NUM_REPLACED_LAYERS)}, target=y_probe, constraint_value=constraint_function(layer_config))
+
 # --- Optimization Process ---
 counter = 0
 while counter < 50:
@@ -261,29 +236,27 @@ while counter < 50:
 
     # Ensure the suggestion is a numpy array of the correct shape
     x_probe = x_probe.reshape(1, -1)
-    
+
     # Predict the utility of the new point
     y_probe = constrained_utility(x_probe, x_dict, optimizer._gp, optimizer._space.target.max())
-    
+
     # Format x_probe to be a dictionary for the objective function
     x_probe_dict = x_dict
-    
+
     # Evaluate the objective function for the new point
     y_actual = objective_function(x_probe_dict)
-    if y_actual > -100 :
-        counter+=1
-    
-        # Register the new point with the observed value
-        optimizer.register(params=x_probe_dict, target=y_actual, constraint_value=constraint_function(
-            {'replaced_layers': {int(x_dict[f'replaced_layer{i}']):int(x_dict[f'replaced_layer{i}']) for i in range(NUM_REPLACED_LAYERS)},
-            'reuse_layers': [int(x_dict[f'reuse_layer{i}']) for i in range(NUM_REUSE_LAYERS)]}
-        ))
+    if y_actual > -100:
+        counter += 1
+
+    # Register the new point with the observed value
+    optimizer.register(params=x_probe_dict, target=y_actual, constraint_value=constraint_function(
+        {'replaced_layers': [int(x_dict[f'replaced_layer{i}']) for i in range(NUM_REPLACED_LAYERS)]}
+    ))
 
 # --- Results ---
 print("Best remapping configuration found:")
 best_remap_config = {
-    'replaced_layers': {int(optimizer.max['params'][f'replaced_layer{i}']): int(optimizer.max['params'][f'replaced_layer{i}']) for i in range(NUM_REPLACED_LAYERS)},
-    'reuse_layers': [int(optimizer.max['params'][f'reuse_layer{i}']) for i in range(NUM_REUSE_LAYERS)]
+    'replaced_layers': [int(optimizer.max['params'][f'replaced_layer{i}']) for i in range(NUM_REPLACED_LAYERS)],
 }
 best_remap = layers_to_remap(best_remap_config)
 print(best_remap)
