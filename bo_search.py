@@ -248,10 +248,10 @@ while counter < 50:
     if y_actual > -100:
         counter += 1
 
-    # Register the new point with the observed value
-    optimizer.register(params=x_probe_dict, target=y_actual, constraint_value=constraint_function(
-        {'replaced_layers': [int(x_dict[f'replaced_layer{i}']) for i in range(NUM_REPLACED_LAYERS)]}
-    ))
+        # Register the new point with the observed value
+        optimizer.register(params=x_probe_dict, target=y_actual, constraint_value=constraint_function(
+            {'replaced_layers': [int(x_dict[f'replaced_layer{i}']) for i in range(NUM_REPLACED_LAYERS)]}
+        ))
 
 # --- Results ---
 print("Best remapping configuration found:")
