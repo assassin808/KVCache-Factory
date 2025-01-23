@@ -9,6 +9,9 @@ import argparse
 import subprocess
 import time
 from bayes_opt import UtilityFunction
+from bayes_opt.util import load_logs
+import os  # Import the 'os' module
+
 
 import run_longbench_BO
 from scipy.optimize import NonlinearConstraint
@@ -228,6 +231,15 @@ optimizer = BayesianOptimization(
     pbounds=pbounds,
     verbose=2,
 )
+
+logs_file = "./logs_prev.json"  # Path to your logs file
+
+if os.path.isfile(logs_file):
+    load_logs(optimizer, logs=[logs_file])
+    print(f"Loaded logs from {logs_file}. Resuming optimization...")
+else:
+    print("No previous logs found. Starting from scratch.")
+
 logger = JSONLogger(path="./logs_.json")
 
 optimizer.subscribe(Events.OPTIMIZATION_STEP, logger)
