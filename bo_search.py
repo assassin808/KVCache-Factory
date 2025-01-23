@@ -8,10 +8,11 @@ import json
 import argparse
 import subprocess
 import time
+from bayes_opt import UtilityFunction
 
 import run_longbench_BO
 from scipy.optimize import NonlinearConstraint
-
+utility_function = UtilityFunction(kind="ucb", kappa=0.1, xi=0.0)
 # --- Configuration ---
 NUM_LAYERS = 32
 NUM_MODIFIABLE_LAYERS = 16  # We're now modifying 16 layers
@@ -174,7 +175,7 @@ def constrained_utility(x, x_dict, gp, y_max):
     if not constraints(layer_config):
         return -1000  # Return 0 if constraints are not met
 
-    return util.ucb(x, gp, 0.1)  # Use UCB as the base utility function
+    return utility_function.utility(x, gp, y_max)  # Use UCB as the base utility function
 
 # Create a BayesianOptimization object
 def dummy_target_func(**kwargs):
@@ -236,15 +237,12 @@ space = TargetSpace(target_func=dummy_target_func, pbounds=pbounds, random_state
 # --- Generate and Register Valid Initial Points ---
 initial_points = generate_valid_initial_points(num_points=8, num_layers=NUM_LAYERS, num_modifiable_layers=NUM_MODIFIABLE_LAYERS, num_replaced_layers=NUM_REPLACED_LAYERS, num_reuse_layers=NUM_REUSE_LAYERS)
 for layer_config in initial_points:
-    # y_probe = objective_function({f'layer{i}': layer_config[i] for i in range(NUM_MODIFIABLE_LAYERS)})
-    # optimizer.register(params={f'layer{i}': layer_config[i] for i in range(NUM_MODIFIABLE_LAYERS)}, target=y_probe, constraint_value=constraint_function({f'layer{i}': layer_config[i] for i in range(NUM_MODIFIABLE_LAYERS)}))
-    
-    y_probe = objective_function({f'replaced_layer{i}': layer_config['replaced_layers'][sorted(list(layer_config['replaced_layers'].keys()))[i]] for i in range(NUM_REPLACED_LAYERS)} | {f'reuse_layer{i}': layer_config['reuse_layers'][i] for i in range(NUM_REUSE_LAYERS)})
-    optimizer.register(params={f'replaced_layer{i}': layer_config['replaced_layers'][sorted(list(layer_config['replaced_layers'].keys()))[i]] for i in range(NUM_REPLACED_LAYERS)} | {f'reuse_layer{i}': layer_config['reuse_layers'][i] for i in range(NUM_REUSE_LAYERS)}, target=y_probe, constraint_value=constraint_function(layer_config))
+    y_probe = objective_function({**{f'replaced_layer{i}': layer_config['replaced_layers'][sorted(list(layer_config['replaced_layers'].keys()))[i]] for i in range(NUM_REPLACED_LAYERS)}, **{f'reuse_layer{i}': layer_config['reuse_layers'][i] for i in range(NUM_REUSE_LAYERS)}})
+    optimizer.register(params={**{f'replaced_layer{i}': layer_config['replaced_layers'][sorted(list(layer_config['replaced_layers'].keys()))[i]] for i in range(NUM_REPLACED_LAYERS)}, **{f'reuse_layer{i}': layer_config['reuse_layers'][i] for i in range(NUM_REUSE_LAYERS)}}, target=y_probe, constraint_value=constraint_function(layer_config))
     
 # --- Optimization Process ---
 counter = 0
-while counter < 20:
+while counter < 50:
     x_probe = optimizer.space.random_sample()
     variable_names = optimizer.space.keys
     x_dict = dict(zip(variable_names, x_probe))
@@ -263,11 +261,11 @@ while counter < 20:
     if y_actual > -100 :
         counter+=1
     
-    # Register the new point with the observed value
-    optimizer.register(params=x_probe_dict, target=y_actual, constraint_value=constraint_function(
-        {'replaced_layers': {int(x_dict[f'replaced_layer{i}']):int(x_dict[f'replaced_layer{i}']) for i in range(NUM_REPLACED_LAYERS)},
-         'reuse_layers': [int(x_dict[f'reuse_layer{i}']) for i in range(NUM_REUSE_LAYERS)]}
-    ))
+        # Register the new point with the observed value
+        optimizer.register(params=x_probe_dict, target=y_actual, constraint_value=constraint_function(
+            {'replaced_layers': {int(x_dict[f'replaced_layer{i}']):int(x_dict[f'replaced_layer{i}']) for i in range(NUM_REPLACED_LAYERS)},
+            'reuse_layers': [int(x_dict[f'reuse_layer{i}']) for i in range(NUM_REUSE_LAYERS)]}
+        ))
 
 # --- Results ---
 print("Best remapping configuration found:")
