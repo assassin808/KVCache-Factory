@@ -545,8 +545,17 @@ def llama_attn_forward_MiniCache(
 
             # past_key_value.update_miniCache(retained_key_states, retained_value_states, unit_key_states, unit_value_states, key_magnitude, value_magnitude, mask_k, mask_v, previous_retained_key_states, previous_retained_value_states, self.layer_idx, self.config.num_hidden_layers)
         else:
+            # print('decoe')
             self.kv_seq_len += q_len
             key_states, value_states = past_key_value.update_miniCache_decode(key_states, value_states, self.layer_idx, self.config.num_hidden_layers, cache_kwargs)
+            past_key_value.decode_q.append(query_states)
+            for item in past_key_value.layer_map:
+                # print(item, len(past_key_value.decode_q)-1)
+                if len(past_key_value.decode_q)-1 == item[1]:
+                    # print(query_states.shape)
+                    query_states[:,item[3],:,:] = past_key_value.decode_q[item[0]][:,item[3],:,:]
+            if len(past_key_value.decode_q) == 32:
+                past_key_value.decode_q.clear()
         past_key_value._seen_tokens=self.kv_seq_len
 
 

@@ -233,6 +233,8 @@ class DynamicCache(Cache):
 
       self.hidden_states = []
       self.query_cache = []
+      self.decode_q = []
+      self.layer_map = []
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
         """
@@ -293,7 +295,7 @@ class DynamicCache(Cache):
         assert len(self.retained_key_cache) <= layer_idx
         self.retained_key_cache.append(key_states)
         self.retained_value_cache.append(value_states)
-        self.hidden_states.append(hidden_states)
+        self.hidden_states.append(None)
         self.query_cache.append(query_states)
 
         layer_map = []
@@ -302,21 +304,27 @@ class DynamicCache(Cache):
             num_segments = 1
             segment_size = self.retained_key_cache[0].shape[2] // num_segments
             attn_lis = []
-            for i in range(32):
-                attn_lis.append(
-                    torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                )
+            import math
             for i in range(32):
                 for j in range(32):
                     if i >= j:
                         continue
                     for seg in range(num_segments):  # Only compare segments at the same position
-                        for head in range(self.retained_key_cache[0].shape[1]):
-                            prev_segment = attn_lis[i][head, seg*segment_size:(seg+1)*segment_size, :]
-                            segment = attn_lis[j][head, seg*segment_size:(seg+1)*segment_size, :]
+                            prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                            prev_segment = prev_segment[:, :, segment_size//2:, :][0]
 
-                            similarity = torch.einsum("bsd,bsd->bs", k_prev_segment/k_prev_segment.norm(dim=-1,keepdim=True), k_segment/k_segment.norm(dim=-1,keepdim=True)).mean().item()
-                            layer_map.append((i, j, seg, head, similarity))  # Store layer indices, segment index, head and similarity
+                            segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                            import torch.nn.functional as F
+                            segment = segment[:, :, segment_size//2:, :][0]
+                            similarity = F.cosine_similarity(
+                                segment.view(32, -1), 
+                                prev_segment.view(32, -1), 
+                                dim=1
+                            )
+                            
+                            # similarity = torch.einsum("bhsd,bhsd->bhs", prev_segment/prev_segment.norm(dim=-1,keepdim=True), segment/segment.norm(dim=-1,keepdim=True)).mean().item()
+                            for head in range(self.retained_key_cache[0].shape[1]):
+                                layer_map.append((i, j, seg, head, similarity[head]))  # Store layer indices, segment index, head and similarity
         layer_map.sort(key=lambda x:-x[-1])#from high to low
 
         self.key_unit_cache.append(None)
@@ -335,16 +343,20 @@ class DynamicCache(Cache):
         replaced_segment = set()
         for item in layer_map:
             i, j, seg,h, _ = item
-            if len(replaced_segment)>=num_segments * 23 * head:
+            if len(replaced_segment)>=num_segments * 20 * 32:
                 break
-            if (j,seg) in used_segment or (j,seg) in replaced_segment or (i,seg) in replaced_segment:
+            if (j,seg,h) in used_segment or (j,seg,h) in replaced_segment or (i,seg,h) in replaced_segment:
                 continue
-            used_segment.add((i,seg))
-            replaced_segment.add((j,seg))
-            self.retained_key_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_key[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
-            self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_value[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
+            self.layer_map.append(item)
+            used_segment.add((i,seg,h))
+            replaced_segment.add((j,seg,h))
+            self.retained_key_cache[j][:, h, :, :] = temp_key[i][:, h, :, :]
+            # self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_value[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
+            # self.retained_key_cache[j][:, :, -8:, :] = temp_key[j][:, :, -8:, :]
+            # self.retained_key_cache[j][:, :, :8, :] = temp_key[j][:, :, :8, :]
+            # self.retained_value_cache[j][:, :, -8:, :] = temp_value[i][:, :, -8:, :]
 
-        del temp_key, temp_value
+        # del temp_key, temp_value
         return ret_value[0], ret_value[1], ret_value[2]
     def update_miniCache(
             self,
@@ -438,6 +450,7 @@ class DynamicCache(Cache):
                 cache.value_magnitude.append(past_key_values[layer_idx][5])
                 cache.mask_k.append(past_key_values[layer_idx][6])
                 cache.mask_v.append(past_key_values[layer_idx][7])
+                cache.layer_map = past_key_values[layer_idx][8]
 
 
         return cache
@@ -456,7 +469,7 @@ class DynamicCache(Cache):
         backward compatibility."""
         legacy_cache = ()
         for layer_idx in range(len(self)):
-            legacy_cache += ((self.retained_key_cache[layer_idx],  self.retained_value_cache[layer_idx], self.key_unit_cache[layer_idx], self.value_unit_cache[layer_idx], self.key_magnitude[layer_idx], self.value_magnitude[layer_idx], self.mask_k[layer_idx], self.mask_v[layer_idx]),)
+            legacy_cache += ((self.retained_key_cache[layer_idx],  self.retained_value_cache[layer_idx], self.key_unit_cache[layer_idx], self.value_unit_cache[layer_idx], self.key_magnitude[layer_idx], self.value_magnitude[layer_idx], self.mask_k[layer_idx], self.mask_v[layer_idx],self.layer_map,),)
         return legacy_cache
 
     def crop(self, max_length: int):
