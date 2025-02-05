@@ -269,6 +269,7 @@ class DynamicCache(Cache):
         cache_kwargs: Optional[Dict[str, Any]] = None,
         hidden_states: torch.Tensor = None, 
         query_states: torch.Tensor = None, 
+        attention_mask = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
@@ -311,37 +312,45 @@ class DynamicCache(Cache):
                     if i >= j:
                         continue
                     for seg in range(num_segments):  # Only compare segments at the same position
-                            prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                            prev_segment = prev_segment[:, :, -1024:, :][0]
-                            segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                            import torch.nn.functional as F
+                        import torch.nn.functional as F
 
-                            # Assuming segment and prev_segment are tensors of shape [batch_size, num_heads, seq_len, head_dim]
-                            segment = segment[:, :, -1024:, :][0]
-                            
+                        if attention_mask is not None:  # no matter the length, we just slice it
+                            causal_mask = attention_mask[:, :, :, :key_states.shape[-2]]
 
-                            # Flatten the tensors to [batch_size * num_heads, seq_len * head_dim]
-                            segment_flat = segment.view(-1, segment.shape[-2] * segment.shape[-1])
-                            prev_segment_flat = prev_segment.view(-1, prev_segment.shape[-2] * prev_segment.shape[-1])
+                        prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                        prev_segment = prev_segment + causal_mask
+                        prev_segment = F.softmax(prev_segment, dim=-1, dtype=torch.float32).to(query_states.dtype)
+                        prev_segment = prev_segment[:, :, -1024:, :][0]
 
-                            # Normalize the tensors to ensure they are probability distributions
-                            segment_norm = F.normalize(segment_flat, p=1, dim=1)
-                            prev_segment_norm = F.normalize(prev_segment_flat, p=1, dim=1)
+                        segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                        segment = segment + causal_mask
+                        segment = F.softmax(segment, dim=-1, dtype=torch.float32).to(query_states.dtype)
+                        segment = segment[:, :, -1024:, :][0]
 
-                            # Calculate the mean distribution M
-                            M = (segment_norm + prev_segment_norm) / 2
+                        # Compute Jensen-Shannon Divergence
+                        # Squeeze the batch dimension (assuming batch size is 1)
+                        prev_segment = prev_segment.squeeze(0)  # Shape: [heads, seq_len, dim]
+                        segment = segment.squeeze(0)            # Shape: [heads, seq_len, dim]
 
-                            # Compute KL divergence from each distribution to the mean distribution
-                            kl_div_P_M = F.kl_div(segment_norm.log(), M, reduction='none').sum(dim=1)
-                            kl_div_Q_M = F.kl_div(prev_segment_norm.log(), M, reduction='none').sum(dim=1)
+                        # Compute the mean distribution M
+                        M = 0.5 * (prev_segment + segment)
 
-                            # Calculate Jensen-Shannon Divergence
-                            js_divergence = -(kl_div_P_M + kl_div_Q_M)
+                        # Compute KL divergences from each distribution to the mean
+                        kl_prev = F.kl_div(prev_segment.log(), M, reduction='none').sum(dim=-1)
+                        kl_seg = F.kl_div(segment.log(), M, reduction='none').sum(dim=-1)
 
-                            # Store the results
-                            for head in range(self.retained_key_cache[0].shape[1]):
-                                layer_map.append((i, j, seg, head, js_divergence[head].item()))  # Store layer indices, segment index, head, and JSD
-                            del segment, prev_segment, segment_flat, prev_segment_flat, segment_norm, prev_segment_norm
+                        # Compute Jensen-Shannon Divergence
+                        js_divergence = 0.5 * (kl_prev + kl_seg)
+
+                        # Average JSD over the sequence length (seq_len) for each head
+                        jsd_means = -js_divergence.mean(dim=1)  # Shape: [heads]
+
+                        # Store the results for each head
+                        for head in range(jsd_means.shape[0]):
+                            layer_map.append((i, j, seg, head, jsd_means[head].item()))
+
+                        # Clean up variables
+                        del segment, prev_segment, M, kl_prev, kl_seg, js_divergence, jsd_means
         layer_map.sort(key=lambda x:-x[-1])#from high to low
 
         self.key_unit_cache.append(None)
