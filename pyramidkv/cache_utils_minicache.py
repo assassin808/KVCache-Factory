@@ -220,6 +220,7 @@ class DynamicCache(Cache):
     def __init__(self, config: PretrainedConfig = None) -> None:
       super().__init__()
       self.config = config
+      self.prefill_len = 0
       self.retained_key_cache: List[torch.Tensor] = []
       self.retained_value_cache: List[torch.Tensor] = []
       self.key_unit_cache: List[torch.Tensor] = []
@@ -343,16 +344,18 @@ class DynamicCache(Cache):
         replaced_segment = set()
         for item in layer_map:
             i, j, seg,h, _ = item
-            if len(replaced_segment)>=num_segments * 20 * 32:
+            if len(replaced_segment)>=num_segments * 10 * 32:
                 break
             if (j,seg,h) in used_segment or (j,seg,h) in replaced_segment or (i,seg,h) in replaced_segment:
+                continue
+            if j <= 0.5* 32:
                 continue
             self.layer_map.append(item)
             used_segment.add((i,seg,h))
             replaced_segment.add((j,seg,h))
-            self.retained_key_cache[j][:, h, :, :] = temp_key[i][:, h, :, :]
+            self.retained_key_cache[j][:, h, :, :] = self.retained_key_cache[i][:, h, :, :]
             # self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_value[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
-            # self.retained_key_cache[j][:, :, -8:, :] = temp_key[j][:, :, -8:, :]
+            self.retained_key_cache[j][:, :, -8:, :] = temp_key[j][:, :, -8:, :]
             # self.retained_key_cache[j][:, :, :8, :] = temp_key[j][:, :, :8, :]
             # self.retained_value_cache[j][:, :, -8:, :] = temp_value[i][:, :, -8:, :]
 
@@ -424,6 +427,13 @@ class DynamicCache(Cache):
 
         # Update the cache
         assert len(self.retained_key_cache) > layer_idx
+        # print(self.retained_key_cache[layer_idx].shape, key_states.shape)
+
+        # for item in self.layer_map:
+        #         # print(item, len(past_key_value.decode_q)-1)
+        #         if layer_idx == item[1]:
+        #             # print(query_states.shape)
+        #             key_states[:,item[3],:,:] = self.retained_key_cache[item[0]][:,item[3],-1,:]
 
 
        

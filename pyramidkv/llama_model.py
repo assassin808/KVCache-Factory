@@ -527,13 +527,14 @@ def llama_attn_forward_MiniCache(
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
-
+    query_states_old = query_states.clone()
     if past_key_value is not None:
         # sin and cos are specific to RoPE models; cache_position needed for the static cache
         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
 
         if key_states.shape[-2] == kv_seq_len:
             self.kv_seq_len = kv_seq_len
+            self.prefill_len = kv_seq_len
             key_states, value_states, hidden_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs, hidden_states, query_states)
 
             # if self.layer_idx == 0:
@@ -558,18 +559,48 @@ def llama_attn_forward_MiniCache(
                 past_key_value.decode_q.clear()
         past_key_value._seen_tokens=self.kv_seq_len
 
+    # print(key_states.shape[-2],self.prefill_len)
+    if past_key_value is not None and key_states.shape[-2] != self.prefill_len:
+        # print(self.prefill_len-8)
+        attn_weights = torch.matmul(query_states, key_states[:,:,:self.prefill_len-8,:].transpose(2, 3)) / math.sqrt(self.head_dim)
 
-    attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        if attention_mask is not None:  # no matter the length, we just slice it
+            causal_mask = attention_mask[:, :, :, : self.prefill_len-8]
+            attn_weights = attn_weights + causal_mask
 
-    if attention_mask is not None:  # no matter the length, we just slice it
-        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-        attn_weights = attn_weights + causal_mask
+        # upcast attention to fp32
+        sum_exp_attn_weights = torch.sum(torch.exp(attn_weights), dim=-1, keepdim=True)
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+        attn_output = torch.matmul(attn_weights, value_states[:,:,:self.prefill_len-8,:])
 
-    # upcast attention to fp32
-    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-    attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-    attn_output = torch.matmul(attn_weights, value_states)
 
+        attn_weights_proximal = torch.matmul(query_states_old, key_states[:,:,self.prefill_len-8:,:].transpose(2, 3)) / math.sqrt(self.head_dim)
+        if attention_mask is not None:  # no matter the length, we just slice it
+            causal_mask = attention_mask[:, :, :, self.prefill_len-8:]
+            attn_weights = attn_weights_proximal + causal_mask
+        sum_exp_attn_weights_proximal = torch.sum(torch.exp(attn_weights_proximal), dim=-1, keepdim=True)
+        attn_weights_proximal = nn.functional.softmax(attn_weights_proximal, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weights_proximal = nn.functional.dropout(attn_weights_proximal, p=self.attention_dropout, training=self.training)
+        attn_output_proximal = torch.matmul(attn_weights_proximal, value_states[:,:,self.prefill_len-8:,:])
+   
+        # Compute the gate
+        gate = sum_exp_attn_weights / (sum_exp_attn_weights + sum_exp_attn_weights_proximal)
+
+        # Weighted sum of the outputs
+        attn_output = gate * attn_output + (1 - gate) * attn_output_proximal
+    else:
+        attn_weights = torch.matmul(query_states, key_states[:,:,:self.prefill_len,:].transpose(2, 3)) / math.sqrt(self.head_dim)
+
+        if attention_mask is not None:  # no matter the length, we just slice it
+            causal_mask = attention_mask[:, :, :, : self.prefill_len]
+            attn_weights = attn_weights + causal_mask
+
+        # upcast attention to fp32
+        sum_exp_attn_weights = torch.sum(torch.exp(attn_weights), dim=-1, keepdim=True)
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+        attn_output = torch.matmul(attn_weights, value_states[:,:,:self.prefill_len,:])
 
     del key_states, value_states
 
