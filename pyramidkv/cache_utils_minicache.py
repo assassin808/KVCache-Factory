@@ -311,46 +311,68 @@ class DynamicCache(Cache):
                 for j in range(32):
                     if i >= j:
                         continue
+                    # print(i,j)
                     for seg in range(num_segments):  # Only compare segments at the same position
                         import torch.nn.functional as F
 
                         if attention_mask is not None:  # no matter the length, we just slice it
                             causal_mask = attention_mask[:, :, :, :key_states.shape[-2]]
+                        with torch.no_grad():
+                            prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                            prev_segment = prev_segment + causal_mask
+                            prev_segment = F.softmax(prev_segment, dim=-1, dtype=torch.float32).to(query_states.dtype)
+                            prev_segment = prev_segment[:, :, -1024:, :][0]
 
-                        prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                        prev_segment = prev_segment + causal_mask
-                        prev_segment = F.softmax(prev_segment, dim=-1, dtype=torch.float32).to(query_states.dtype)
-                        prev_segment = prev_segment[:, :, -1024:, :][0]
-
-                        segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                        segment = segment + causal_mask
-                        segment = F.softmax(segment, dim=-1, dtype=torch.float32).to(query_states.dtype)
-                        segment = segment[:, :, -1024:, :][0]
+                            segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                            segment = segment + causal_mask
+                            segment = F.softmax(segment, dim=-1, dtype=torch.float32).to(query_states.dtype)
+                            segment = segment[:, :, -1024:, :][0]
 
                         # Compute Jensen-Shannon Divergence
                         # Squeeze the batch dimension (assuming batch size is 1)
-                        prev_segment = prev_segment.squeeze(0)  # Shape: [heads, seq_len, dim]
-                        segment = segment.squeeze(0)            # Shape: [heads, seq_len, dim]
-
+                        prev_segment = prev_segment.squeeze(0) # Shape: [heads, seq_len, dim]
+                        segment = segment.squeeze(0)          # Shape: [heads, seq_len, dim]
+                        # print(segment.sum(dim=-1))
                         # Compute the mean distribution M
-                        M = 0.5 * (prev_segment + segment)
+                        M =  (prev_segment + segment) / 2
+                        # print('M',M)
+                    
+                        # # Compute KL divergences from each distribution to the mean
+                        # kl_prev = F.kl_div(prev_segment, M, reduction='none')
+                        # # print(kl_prev[0])
+                        # kl_prev[kl_prev.isnan()] = 0.0
+                        # kl_prev = kl_prev.sum(dim=-1)
 
-                        # Compute KL divergences from each distribution to the mean
-                        kl_prev = F.kl_div(prev_segment.log(), M, reduction='none').sum(dim=-1)
-                        kl_seg = F.kl_div(segment.log(), M, reduction='none').sum(dim=-1)
+                        # kl_seg = F.kl_div(segment, M, reduction='none')
+                        # # print(kl_seg[0])
+                        # kl_seg[kl_seg.isnan()] = 0.0
+                        # kl_seg = kl_seg.sum(dim=-1)
+
+                        # # print(kl_prev[0],kl_seg[0])
+
 
                         # Compute Jensen-Shannon Divergence
-                        js_divergence = 0.5 * (kl_prev + kl_seg)
+                        prev = prev_segment.log() * prev_segment / 2
+                        prev[prev.isnan()] = 0.0
+                        seg = segment.log() * segment / 2
+                        seg[seg.isnan()] = 0.0
+                        M = - M * M.log() 
+                        M[M.isnan()] = 0.0
+                        M = M + prev + seg
+                       
+                        M = M.sum(dim=-1)
 
                         # Average JSD over the sequence length (seq_len) for each head
-                        jsd_means = -js_divergence.mean(dim=1)  # Shape: [heads]
+                        jsd_means = -M.mean(dim=1)  # Shape: [heads]                     
 
                         # Store the results for each head
                         for head in range(jsd_means.shape[0]):
-                            layer_map.append((i, j, seg, head, jsd_means[head].item()))
+                            layer_map.append((i, j, None, head, jsd_means[head].item()))
 
                         # Clean up variables
-                        del segment, prev_segment, M, kl_prev, kl_seg, js_divergence, jsd_means
+                        del segment, prev_segment, M, jsd_means, causal_mask, prev, seg
+                        torch.cuda.empty_cache()
+
         layer_map.sort(key=lambda x:-x[-1])#from high to low
 
         self.key_unit_cache.append(None)
