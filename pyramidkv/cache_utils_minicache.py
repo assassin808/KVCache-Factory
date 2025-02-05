@@ -312,20 +312,36 @@ class DynamicCache(Cache):
                         continue
                     for seg in range(num_segments):  # Only compare segments at the same position
                             prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                            prev_segment = prev_segment[:, :, segment_size//2:, :][0]
-
+                            prev_segment = prev_segment[:, :, -1024:, :][0]
                             segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
                             import torch.nn.functional as F
-                            segment = segment[:, :, segment_size//2:, :][0]
-                            similarity = F.cosine_similarity(
-                                segment.view(32, -1), 
-                                prev_segment.view(32, -1), 
-                                dim=1
-                            )
+
+                            # Assuming segment and prev_segment are tensors of shape [batch_size, num_heads, seq_len, head_dim]
+                            segment = segment[:, :, -1024:, :][0]
                             
-                            # similarity = torch.einsum("bhsd,bhsd->bhs", prev_segment/prev_segment.norm(dim=-1,keepdim=True), segment/segment.norm(dim=-1,keepdim=True)).mean().item()
+
+                            # Flatten the tensors to [batch_size * num_heads, seq_len * head_dim]
+                            segment_flat = segment.view(-1, segment.shape[-2] * segment.shape[-1])
+                            prev_segment_flat = prev_segment.view(-1, prev_segment.shape[-2] * prev_segment.shape[-1])
+
+                            # Normalize the tensors to ensure they are probability distributions
+                            segment_norm = F.normalize(segment_flat, p=1, dim=1)
+                            prev_segment_norm = F.normalize(prev_segment_flat, p=1, dim=1)
+
+                            # Calculate the mean distribution M
+                            M = (segment_norm + prev_segment_norm) / 2
+
+                            # Compute KL divergence from each distribution to the mean distribution
+                            kl_div_P_M = F.kl_div(segment_norm.log(), M, reduction='none').sum(dim=1)
+                            kl_div_Q_M = F.kl_div(prev_segment_norm.log(), M, reduction='none').sum(dim=1)
+
+                            # Calculate Jensen-Shannon Divergence
+                            js_divergence = -(kl_div_P_M + kl_div_Q_M)
+
+                            # Store the results
                             for head in range(self.retained_key_cache[0].shape[1]):
-                                layer_map.append((i, j, seg, head, similarity[head]))  # Store layer indices, segment index, head and similarity
+                                layer_map.append((i, j, seg, head, js_divergence[head].item()))  # Store layer indices, segment index, head, and JSD
+                            del segment, prev_segment, segment_flat, prev_segment_flat, segment_norm, prev_segment_norm
         layer_map.sort(key=lambda x:-x[-1])#from high to low
 
         self.key_unit_cache.append(None)
@@ -336,7 +352,7 @@ class DynamicCache(Cache):
         self.mask_v.append(None)
 
 
-        ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx])
+        ret_value = (self.retained_key_cache[layer_idx].clone(), self.retained_value_cache[layer_idx].clone(), self.hidden_states[layer_idx])
 
         temp_key = [i.clone() for i in self.retained_key_cache]
         temp_value = [i.clone() for i in self.retained_value_cache]
@@ -344,18 +360,18 @@ class DynamicCache(Cache):
         replaced_segment = set()
         for item in layer_map:
             i, j, seg,h, _ = item
-            if len(replaced_segment)>=num_segments * 10 * 32:
+            if len(replaced_segment)>=num_segments * 23 * 32:
                 break
             if (j,seg,h) in used_segment or (j,seg,h) in replaced_segment or (i,seg,h) in replaced_segment:
                 continue
-            if j <= 0.5* 32:
-                continue
+            # if j <= 0.2* 32:
+            #     continue
             self.layer_map.append(item)
             used_segment.add((i,seg,h))
             replaced_segment.add((j,seg,h))
-            self.retained_key_cache[j][:, h, :, :] = self.retained_key_cache[i][:, h, :, :]
+            self.retained_key_cache[j][:, h, 128:-128, :] = self.retained_key_cache[i][:, h, 128:-128, :]
             # self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_value[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
-            self.retained_key_cache[j][:, :, -8:, :] = temp_key[j][:, :, -8:, :]
+            # self.retained_key_cache[j][:, :, -8:, :] = temp_key[j][:, :, -8:, :]
             # self.retained_key_cache[j][:, :, :8, :] = temp_key[j][:, :, :8, :]
             # self.retained_value_cache[j][:, :, -8:, :] = temp_value[i][:, :, -8:, :]
 

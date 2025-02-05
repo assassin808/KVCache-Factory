@@ -546,14 +546,15 @@ def llama_attn_forward_MiniCache(
 
             # past_key_value.update_miniCache(retained_key_states, retained_value_states, unit_key_states, unit_value_states, key_magnitude, value_magnitude, mask_k, mask_v, previous_retained_key_states, previous_retained_value_states, self.layer_idx, self.config.num_hidden_layers)
         else:
-            # print('decoe')
             self.kv_seq_len += q_len
             key_states, value_states = past_key_value.update_miniCache_decode(key_states, value_states, self.layer_idx, self.config.num_hidden_layers, cache_kwargs)
-            past_key_value.decode_q.append(query_states)
+            past_key_value.decode_q.append(query_states.clone())
+            # print(past_key_value.decode_q)
             for item in past_key_value.layer_map:
                 # print(item, len(past_key_value.decode_q)-1)
                 if len(past_key_value.decode_q)-1 == item[1]:
                     # print(query_states.shape)
+                    # print(past_key_value.decode_q[item[0]][:,item[3],:,:].sum().isnan())
                     query_states[:,item[3],:,:] = past_key_value.decode_q[item[0]][:,item[3],:,:]
             if len(past_key_value.decode_q) == 32:
                 past_key_value.decode_q.clear()
@@ -562,47 +563,60 @@ def llama_attn_forward_MiniCache(
     # print(key_states.shape[-2],self.prefill_len)
     if past_key_value is not None and key_states.shape[-2] != self.prefill_len:
         # print(self.prefill_len-8)
-        attn_weights = torch.matmul(query_states, key_states[:,:,:self.prefill_len-8,:].transpose(2, 3)) / math.sqrt(self.head_dim)
-
-        if attention_mask is not None:  # no matter the length, we just slice it
-            causal_mask = attention_mask[:, :, :, : self.prefill_len-8]
-            attn_weights = attn_weights + causal_mask
+        attn_weights = torch.matmul(query_states, key_states[:,:,128:self.prefill_len-128,:].transpose(2, 3)) / math.sqrt(self.head_dim)
 
         # upcast attention to fp32
-        sum_exp_attn_weights = torch.sum(torch.exp(attn_weights), dim=-1, keepdim=True)
+
+        index = list(range(0, 128)) + list(range(self.prefill_len-128, key_states.shape[-2]))
+        attn_weights_proximal = torch.matmul(query_states_old, key_states[:,:,index,:].transpose(2, 3)) / math.sqrt(self.head_dim)
+
+       
+
+
+        max_weight = (attn_weights.max(dim=-1,keepdim=True)[0] + attn_weights_proximal.max(dim=-1,keepdim=True)[0] + abs(attn_weights.max(dim=-1,keepdim=True)[0] - attn_weights_proximal.max(dim=-1,keepdim=True)[0]))/2
+
+        sum_exp_attn_weights_proximal = torch.sum(torch.exp(attn_weights_proximal-max_weight), dim=-1, keepdim=True)
+
+
+        sum_exp_attn_weights = torch.sum(torch.exp(attn_weights-max_weight), dim=-1, keepdim=True)
+        # print(query_states.sum().isnan(),key_states[:,:,128:self.prefill_len-128,:].sum().isnan())
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        attn_output = torch.matmul(attn_weights, value_states[:,:,:self.prefill_len-8,:])
+        attn_output = torch.matmul(attn_weights, value_states[:,:,128:self.prefill_len-128,:])
 
-
-        attn_weights_proximal = torch.matmul(query_states_old, key_states[:,:,self.prefill_len-8:,:].transpose(2, 3)) / math.sqrt(self.head_dim)
-        if attention_mask is not None:  # no matter the length, we just slice it
-            causal_mask = attention_mask[:, :, :, self.prefill_len-8:]
-            attn_weights = attn_weights_proximal + causal_mask
-        sum_exp_attn_weights_proximal = torch.sum(torch.exp(attn_weights_proximal), dim=-1, keepdim=True)
+        
+        # print(sum_exp_attn_weights_proximal.sum().isnan(),sum_exp_attn_weights.sum().isnan())
         attn_weights_proximal = nn.functional.softmax(attn_weights_proximal, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_weights_proximal = nn.functional.dropout(attn_weights_proximal, p=self.attention_dropout, training=self.training)
-        attn_output_proximal = torch.matmul(attn_weights_proximal, value_states[:,:,self.prefill_len-8:,:])
-   
+        attn_output_proximal = torch.matmul(attn_weights_proximal, value_states[:,:,index,:])
+        # print(sum_exp_attn_weights.mean(), sum_exp_attn_weights_proximal.mean())
         # Compute the gate
-        gate = sum_exp_attn_weights / (sum_exp_attn_weights + sum_exp_attn_weights_proximal)
-
+        gate = sum_exp_attn_weights_proximal / (sum_exp_attn_weights + sum_exp_attn_weights_proximal)
+        
+        # print(gate.sum().isnan().item())
+        # if gate.sum().isnan().item():
+        #     print(sum_exp_attn_weights , (sum_exp_attn_weights + sum_exp_attn_weights_proximal + 1e-5))
+        #     exit(0)
+        # print(gate.mean())
+        gate[gate.isnan()] = 1
+        
         # Weighted sum of the outputs
-        attn_output = gate * attn_output + (1 - gate) * attn_output_proximal
+        # attn_output =  (1 - gate) * attn_output + gate * attn_output_proximal
+        attn_output =  0.2 * attn_output + 0.8 * attn_output_proximal
     else:
-        attn_weights = torch.matmul(query_states, key_states[:,:,:self.prefill_len,:].transpose(2, 3)) / math.sqrt(self.head_dim)
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
         if attention_mask is not None:  # no matter the length, we just slice it
-            causal_mask = attention_mask[:, :, :, : self.prefill_len]
+            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
             attn_weights = attn_weights + causal_mask
 
         # upcast attention to fp32
         sum_exp_attn_weights = torch.sum(torch.exp(attn_weights), dim=-1, keepdim=True)
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        attn_output = torch.matmul(attn_weights, value_states[:,:,:self.prefill_len,:])
+        attn_output = torch.matmul(attn_weights, value_states)
 
-    del key_states, value_states
+    # del key_states, value_states
 
     if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
         raise ValueError(
