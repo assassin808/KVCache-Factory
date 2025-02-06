@@ -306,6 +306,14 @@ class DynamicCache(Cache):
             num_segments = 1
             segment_size = self.retained_key_cache[0].shape[2] // num_segments
             attn_lis = []
+            # with open('layer_map.csv', 'r') as f:
+            #     layer_map = []
+            #     for line in f:
+            #         layer_map.append([i for i in line.strip().split(',')])
+            #         for i in range(5):
+            #             layer_map[-1][i] = int(layer_map[-1][i])
+            #         layer_map[-1][5] = float(layer_map[-1][5])
+            #         layer_map[-1][6] = float(layer_map[-1][6])
             import math
             import torch.nn.functional as F
 
@@ -316,16 +324,17 @@ class DynamicCache(Cache):
 
                     # Get query-key pairs for both layers
                     prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                    p = prev_segment[:, :, -1024//2:, :][0]  # [num_heads, seq_len, dim]
+                    p = prev_segment[:, :, -1024//2:, list(range(0,self.retained_key_cache[0].shape[2],4))][0]  # [num_heads, seq_len, dim]
                     
                     segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                    s = segment[:, :, -1024//2:, :][0]  # [num_heads, seq_len, dim]
+                    s = segment[:, :, -1024//2:, list(range(0,self.retained_key_cache[0].shape[2],4))][0]  # [num_heads, seq_len, dim]
 
                     # Calculate cross-head similarity matrix
                     p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D]
                     s_expanded = s.unsqueeze(0)  # [1, H_j, S, D]
                     
                     # Compute cosine similarity and average over sequence
+                    del prev_segment, segment
                     cosine_sim = F.cosine_similarity(p_expanded, s_expanded, dim=-1)
                     cosine_sim_avg = cosine_sim.mean(dim=-1)  # [H_i, H_j]
                     # Find best matches for each head in layer i
@@ -342,12 +351,12 @@ class DynamicCache(Cache):
                             scaling = s_norm / p_norm if p_norm != 0 else 0.0
 
                             # Store matched pair information
-                            if sim < 0.5:
+                            if sim < 0.9:
                                 continue
                             layer_map.append((i, j, 0, head_i, head_j, sim, scaling))
 
                     # Cleanup
-                    del prev_segment, segment, p, s
+                    del  p, s, p_expanded, s_expanded
 
 
         layer_map.sort(key=lambda x:-x[-2])#from high to low
@@ -374,22 +383,22 @@ class DynamicCache(Cache):
                 continue
             # if j <= 0.2 * 32:
             #     continue
-            print('sim',i,j,hi,hj,_)
+            # print('sim',i,j,hi,hj,_)
             self.layer_map.append(item)
             used_segment.add((i,seg,hi))
             replaced_segment.add((j,seg,hj))
             self.retained_key_cache[j][:, hj, 128:-128, :] = self.retained_key_cache[i][:, hi, 128:-128, :]
-            # self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_value[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
+            self.retained_value_cache[j][:, hj, 128:-128, :] = temp_value[i][:, hi, 128:-128, :]
             # self.retained_key_cache[j][:, :, -8:, :] = temp_key[j][:, :, -8:, :]
             # self.retained_key_cache[j][:, :, :8, :] = temp_key[j][:, :, :8, :]
             # self.retained_value_cache[j][:, :, -8:, :] = temp_value[i][:, :, -8:, :]
 
         # del temp_key, temp_value
         # if layer_idx == 31:
-        #     print(len(replaced_segment), 23*32)
-        # with open('layer_map.csv', 'w') as f:
-        #     for item in self.layer_map:
-        #         f.write(','.join([str(i) for i in item]) + '\n')
+        #     with open('layer_map.csv', 'w') as f:
+        #         for item in self.layer_map:
+        #             f.write(','.join([str(i) for i in item]) + '\n')
+        #     exit(0)
         # with open('layer_map.csv', 'r') as f:
         #     layer_map = []
         #     for line in f:
