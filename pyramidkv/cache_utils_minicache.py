@@ -307,85 +307,50 @@ class DynamicCache(Cache):
             segment_size = self.retained_key_cache[0].shape[2] // num_segments
             attn_lis = []
             import math
+            import torch.nn.functional as F
+
             for i in range(32):
                 for j in range(32):
                     if i >= j:
                         continue
-                    # print(i,j)
-                    for seg in range(num_segments):  # Only compare segments at the same position
-                        import torch.nn.functional as F
 
-                        # if attention_mask is not None:  # no matter the length, we just slice it
-                        #     causal_mask = attention_mask[:, :, :, :key_states.shape[-2]]
-                        prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                        p = prev_segment[:, :, -1024*2:, :][0]
-                        # prev_segment = prev_segment + causal_mask
-                        # # p_exp = prev_segment.clone()[:, :, -1024:, :][0].exp()
-                        # prev_segment = F.softmax(prev_segment, dim=-1, dtype=torch.float32).to(query_states.dtype)
-                        # prev_segment = prev_segment[:, :, -1024:, :][0]
-
-                        segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                        s = segment[:, :, -1024*2:, :][0]
-                        # segment = segment + causal_mask
-                        # # s_exp = segment.clone()[:, :, -1024:, :][0].exp()
-                        # segment = F.softmax(segment, dim=-1, dtype=torch.float32).to(query_states.dtype)
-                        # segment = segment[:, :, -1024:, :][0]
-                        
-                        # def cosine_similarity_matching_heads(v1, v2):
-
-
-                        #     # Compute the cosine similarity between all pairs of heads
-                        #     # Reshape v1 to [32, 1, n, 128] and v2 to [1, 32, n, 128] for broadcasting
-                        #     v1_expanded = v1.unsqueeze(1)  # Shape: [32, 1, n, 128]
-                        #     v2_expanded = v2.unsqueeze(0)  # Shape: [1, 32, n, 128]
-                        #     print(v1_expanded.shape,v2_expanded.shape)
-
-                        #     # Compute cosine similarity along the last dimension (n, 128)
-                        #     cosine_sim = F.cosine_similarity(v1_expanded, v2_expanded, dim=-1)  # Shape: [32, 32, n]
-
-                        #     # Average over the sequence length (n) to get head-wise similarity
-                        #     cosine_sim = cosine_sim.mean(dim=-1)  # Shape: [32, 32]
-
-                        #     # Find the best matching head for each head in v1
-                        #     max_sim, _ = torch.max(cosine_sim, dim=1)  # Shape: [32]
-                        #     print(_)
-
-                        #     # Average the similarity scores of the best matching heads
-                        #     avg_similarity = max_sim.mean().item()
-
-                        #     return avg_similarity
-
-
-                        
-
-                        # Compute Jensen-Shannon Divergence
-                        # Squeeze the batch dimension (assuming batch size is 1)
-                        prev_segment = prev_segment.squeeze(0) # Shape: [heads, seq_len, dim]
-                        segment = segment.squeeze(0)          # Shape: [heads, seq_len, dim]
-                        # print(segment.sum(dim=-1))
-                        # Compute the mean distribution M
-                        # similaristy = torch.einsum('hqn, hqn -> hq', segment/segment.norm(dim=-1,keepdim=True), prev_segment/prev_segment.norm(dim=-1,keepdim=True)).mean(dim=-1)
-                        similarity_qk = torch.einsum('hqn, hqn -> hq', p/p.norm(dim=-1,keepdim=True), s/s.norm(dim=-1,keepdim=True)).mean(dim=-1)
-                        scaling =  (s.norm(dim=-1) / p.norm(dim=-1)).mean(dim=-1)
-                        # similarity_qk_exp = torch.einsum('hqn, hqn -> hq', p_exp/p_exp.norm(dim=-1,keepdim=True), s_exp/s_exp.norm(dim=-1,keepdim=True)).mean(dim=-1)
-                        # print(cosine_similarity_matching_heads(p,s))
-                        # print(i,j,'qk',similarity_qk)
-                        # print(i,j,'exp qk',similarity_qk_exp)
-                        # print((p.norm(dim=-1)/s.norm(dim=-1)).mean(dim=-1))
-                        # print((p.norm(dim=-1)/s.norm(dim=-1)).std(dim=-1))
-                        # print(p-s)
-                        # print('none',similarity)
-                        # print(p.norm(dim=-1,keepdim=True)/s.norm(dim=-1,keepdim=True))
+                    # Get query-key pairs for both layers
+                    prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                    p = prev_segment[:, :, -1024//2:, :][0]  # [num_heads, seq_len, dim]
                     
+                    segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                    s = segment[:, :, -1024//2:, :][0]  # [num_heads, seq_len, dim]
 
-                        # Store the results for each head
-                        for head in range(similarity_qk.shape[0]):
-                            layer_map.append((i, j, None, head, similarity_qk[head].item(),scaling[head].item()))
+                    # Calculate cross-head similarity matrix
+                    p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D]
+                    s_expanded = s.unsqueeze(0)  # [1, H_j, S, D]
+                    
+                    # Compute cosine similarity and average over sequence
+                    cosine_sim = F.cosine_similarity(p_expanded, s_expanded, dim=-1)
+                    cosine_sim_avg = cosine_sim.mean(dim=-1)  # [H_i, H_j]
+                    # Find best matches for each head in layer i
+                    for head_i in range(cosine_sim_avg.size(0)):
+                        for head_j in range(cosine_sim_avg.size(1)):
+                            sim = cosine_sim_avg[head_i][head_j].item()
 
-                        # Clean up variables
-                        del segment, prev_segment, p,s
 
-        layer_map.sort(key=lambda x:-x[4])#from high to low
+                            # Calculate norm scaling for matched heads
+                            p_head = p[head_i]
+                            s_head = s[head_j]
+                            p_norm = p_head.norm(dim=-1).mean().item()
+                            s_norm = s_head.norm(dim=-1).mean().item()
+                            scaling = s_norm / p_norm if p_norm != 0 else 0.0
+
+                            # Store matched pair information
+                            if sim < 0.5:
+                                continue
+                            layer_map.append((i, j, None, head_i, head_j, sim, scaling))
+
+                    # Cleanup
+                    del prev_segment, segment, p, s
+
+
+        layer_map.sort(key=lambda x:-x[-2])#from high to low
 
         self.key_unit_cache.append(None)
         self.value_unit_cache.append(None)
@@ -402,24 +367,26 @@ class DynamicCache(Cache):
         used_segment = set()
         replaced_segment = set()
         for item in layer_map:
-            i, j, seg,h, _, s = item
-            if len(replaced_segment)>=num_segments * 13 * 32:
+            i, j, seg,hi,hj, _, s = item
+            if len(replaced_segment)>= 23 * 32:
                 break
-            if (j,seg,h) in used_segment or (j,seg,h) in replaced_segment or (i,seg,h) in replaced_segment:
+            if (j,seg,hj) in used_segment or (j,seg,hj) in replaced_segment or (i,seg,hi) in replaced_segment:
                 continue
             # if j <= 0.2 * 32:
             #     continue
-            # print('sim',i,j,h,_)
+            print('sim',i,j,hi,hj,_)
             self.layer_map.append(item)
-            used_segment.add((i,seg,h))
-            replaced_segment.add((j,seg,h))
-            self.retained_key_cache[j][:, h, 128:-128, :] = self.retained_key_cache[i][:, h, 128:-128, :]
+            used_segment.add((i,seg,hi))
+            replaced_segment.add((j,seg,hj))
+            self.retained_key_cache[j][:, hj, 128:-128, :] = self.retained_key_cache[i][:, hi, 128:-128, :]
             # self.retained_value_cache[j][:, :, seg*segment_size:(seg+1)*segment_size, :] = temp_value[i][:, :, seg*segment_size:(seg+1)*segment_size, :]
             # self.retained_key_cache[j][:, :, -8:, :] = temp_key[j][:, :, -8:, :]
             # self.retained_key_cache[j][:, :, :8, :] = temp_key[j][:, :, :8, :]
             # self.retained_value_cache[j][:, :, -8:, :] = temp_value[i][:, :, -8:, :]
 
         # del temp_key, temp_value
+        # if layer_idx == 31:
+        #     print(len(replaced_segment), 23*32)
         return ret_value[0], ret_value[1], ret_value[2]
     def update_miniCache(
             self,
