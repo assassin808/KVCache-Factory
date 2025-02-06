@@ -344,7 +344,7 @@ class DynamicCache(Cache):
                             # Store matched pair information
                             if sim < 0.5:
                                 continue
-                            layer_map.append((i, j, None, head_i, head_j, sim, scaling))
+                            layer_map.append((i, j, 0, head_i, head_j, sim, scaling))
 
                     # Cleanup
                     del prev_segment, segment, p, s
@@ -387,6 +387,18 @@ class DynamicCache(Cache):
         # del temp_key, temp_value
         # if layer_idx == 31:
         #     print(len(replaced_segment), 23*32)
+        # with open('layer_map.csv', 'w') as f:
+        #     for item in self.layer_map:
+        #         f.write(','.join([str(i) for i in item]) + '\n')
+        # with open('layer_map.csv', 'r') as f:
+        #     layer_map = []
+        #     for line in f:
+        #         layer_map.append([i for i in line.strip().split(',')])
+        #         for i in range(5):
+        #             layer_map[-1][i] = int(layer_map[-1][i])
+        #         layer_map[-1][5] = float(layer_map[-1][5])
+        #         layer_map[-1][6] = float(layer_map[-1][6])
+                
         return ret_value[0], ret_value[1], ret_value[2]
     def update_miniCache(
             self,
