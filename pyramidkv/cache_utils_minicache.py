@@ -315,18 +315,48 @@ class DynamicCache(Cache):
                     for seg in range(num_segments):  # Only compare segments at the same position
                         import torch.nn.functional as F
 
-                        if attention_mask is not None:  # no matter the length, we just slice it
-                            causal_mask = attention_mask[:, :, :, :key_states.shape[-2]]
-                        with torch.no_grad():
-                            prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                            prev_segment = prev_segment + causal_mask
-                            prev_segment = F.softmax(prev_segment, dim=-1, dtype=torch.float32).to(query_states.dtype)
-                            prev_segment = prev_segment[:, :, -1024:, :][0]
+                        # if attention_mask is not None:  # no matter the length, we just slice it
+                        #     causal_mask = attention_mask[:, :, :, :key_states.shape[-2]]
+                        prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                        p = prev_segment[:, :, -1024*2:, :][0]
+                        # prev_segment = prev_segment + causal_mask
+                        # # p_exp = prev_segment.clone()[:, :, -1024:, :][0].exp()
+                        # prev_segment = F.softmax(prev_segment, dim=-1, dtype=torch.float32).to(query_states.dtype)
+                        # prev_segment = prev_segment[:, :, -1024:, :][0]
 
-                            segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                            segment = segment + causal_mask
-                            segment = F.softmax(segment, dim=-1, dtype=torch.float32).to(query_states.dtype)
-                            segment = segment[:, :, -1024:, :][0]
+                        segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                        s = segment[:, :, -1024*2:, :][0]
+                        # segment = segment + causal_mask
+                        # # s_exp = segment.clone()[:, :, -1024:, :][0].exp()
+                        # segment = F.softmax(segment, dim=-1, dtype=torch.float32).to(query_states.dtype)
+                        # segment = segment[:, :, -1024:, :][0]
+                        
+                        # def cosine_similarity_matching_heads(v1, v2):
+
+
+                        #     # Compute the cosine similarity between all pairs of heads
+                        #     # Reshape v1 to [32, 1, n, 128] and v2 to [1, 32, n, 128] for broadcasting
+                        #     v1_expanded = v1.unsqueeze(1)  # Shape: [32, 1, n, 128]
+                        #     v2_expanded = v2.unsqueeze(0)  # Shape: [1, 32, n, 128]
+                        #     print(v1_expanded.shape,v2_expanded.shape)
+
+                        #     # Compute cosine similarity along the last dimension (n, 128)
+                        #     cosine_sim = F.cosine_similarity(v1_expanded, v2_expanded, dim=-1)  # Shape: [32, 32, n]
+
+                        #     # Average over the sequence length (n) to get head-wise similarity
+                        #     cosine_sim = cosine_sim.mean(dim=-1)  # Shape: [32, 32]
+
+                        #     # Find the best matching head for each head in v1
+                        #     max_sim, _ = torch.max(cosine_sim, dim=1)  # Shape: [32]
+                        #     print(_)
+
+                        #     # Average the similarity scores of the best matching heads
+                        #     avg_similarity = max_sim.mean().item()
+
+                        #     return avg_similarity
+
+
+                        
 
                         # Compute Jensen-Shannon Divergence
                         # Squeeze the batch dimension (assuming batch size is 1)
@@ -334,46 +364,28 @@ class DynamicCache(Cache):
                         segment = segment.squeeze(0)          # Shape: [heads, seq_len, dim]
                         # print(segment.sum(dim=-1))
                         # Compute the mean distribution M
-                        M =  (prev_segment + segment) / 2
-                        # print('M',M)
+                        # similaristy = torch.einsum('hqn, hqn -> hq', segment/segment.norm(dim=-1,keepdim=True), prev_segment/prev_segment.norm(dim=-1,keepdim=True)).mean(dim=-1)
+                        similarity_qk = torch.einsum('hqn, hqn -> hq', p/p.norm(dim=-1,keepdim=True), s/s.norm(dim=-1,keepdim=True)).mean(dim=-1)
+                        scaling =  (s.norm(dim=-1) / p.norm(dim=-1)).mean(dim=-1)
+                        # similarity_qk_exp = torch.einsum('hqn, hqn -> hq', p_exp/p_exp.norm(dim=-1,keepdim=True), s_exp/s_exp.norm(dim=-1,keepdim=True)).mean(dim=-1)
+                        # print(cosine_similarity_matching_heads(p,s))
+                        # print(i,j,'qk',similarity_qk)
+                        # print(i,j,'exp qk',similarity_qk_exp)
+                        # print((p.norm(dim=-1)/s.norm(dim=-1)).mean(dim=-1))
+                        # print((p.norm(dim=-1)/s.norm(dim=-1)).std(dim=-1))
+                        # print(p-s)
+                        # print('none',similarity)
+                        # print(p.norm(dim=-1,keepdim=True)/s.norm(dim=-1,keepdim=True))
                     
-                        # # Compute KL divergences from each distribution to the mean
-                        # kl_prev = F.kl_div(prev_segment, M, reduction='none')
-                        # # print(kl_prev[0])
-                        # kl_prev[kl_prev.isnan()] = 0.0
-                        # kl_prev = kl_prev.sum(dim=-1)
-
-                        # kl_seg = F.kl_div(segment, M, reduction='none')
-                        # # print(kl_seg[0])
-                        # kl_seg[kl_seg.isnan()] = 0.0
-                        # kl_seg = kl_seg.sum(dim=-1)
-
-                        # # print(kl_prev[0],kl_seg[0])
-
-
-                        # Compute Jensen-Shannon Divergence
-                        prev = prev_segment.log() * prev_segment / 2
-                        prev[prev.isnan()] = 0.0
-                        seg = segment.log() * segment / 2
-                        seg[seg.isnan()] = 0.0
-                        M = - M * M.log() 
-                        M[M.isnan()] = 0.0
-                        M = M + prev + seg
-                       
-                        M = M.sum(dim=-1)
-
-                        # Average JSD over the sequence length (seq_len) for each head
-                        jsd_means = -M.mean(dim=1)  # Shape: [heads]                     
 
                         # Store the results for each head
-                        for head in range(jsd_means.shape[0]):
-                            layer_map.append((i, j, None, head, jsd_means[head].item()))
+                        for head in range(similarity_qk.shape[0]):
+                            layer_map.append((i, j, None, head, similarity_qk[head].item(),scaling[head].item()))
 
                         # Clean up variables
-                        del segment, prev_segment, M, jsd_means, causal_mask, prev, seg
-                        torch.cuda.empty_cache()
+                        del segment, prev_segment, p,s
 
-        layer_map.sort(key=lambda x:-x[-1])#from high to low
+        layer_map.sort(key=lambda x:-x[4])#from high to low
 
         self.key_unit_cache.append(None)
         self.value_unit_cache.append(None)
@@ -390,13 +402,14 @@ class DynamicCache(Cache):
         used_segment = set()
         replaced_segment = set()
         for item in layer_map:
-            i, j, seg,h, _ = item
-            if len(replaced_segment)>=num_segments * 23 * 32:
+            i, j, seg,h, _, s = item
+            if len(replaced_segment)>=num_segments * 13 * 32:
                 break
             if (j,seg,h) in used_segment or (j,seg,h) in replaced_segment or (i,seg,h) in replaced_segment:
                 continue
-            # if j <= 0.2* 32:
+            # if j <= 0.2 * 32:
             #     continue
+            # print('sim',i,j,h,_)
             self.layer_map.append(item)
             used_segment.add((i,seg,h))
             replaced_segment.add((j,seg,h))

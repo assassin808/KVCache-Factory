@@ -555,7 +555,7 @@ def llama_attn_forward_MiniCache(
                 if len(past_key_value.decode_q)-1 == item[1]:
                     # print(query_states.shape)
                     # print(past_key_value.decode_q[item[0]][:,item[3],:,:].sum().isnan())
-                    query_states[:,item[3],:,:] = past_key_value.decode_q[item[0]][:,item[3],:,:]
+                    query_states[:,item[3],:,:] = past_key_value.decode_q[item[0]][:,item[3],:,:] * item[-1]
             if len(past_key_value.decode_q) == 32:
                 past_key_value.decode_q.clear()
         past_key_value._seen_tokens=self.kv_seq_len
@@ -564,7 +564,6 @@ def llama_attn_forward_MiniCache(
     if past_key_value is not None and key_states.shape[-2] != self.prefill_len:
         # print(self.prefill_len-8)
         attn_weights = torch.matmul(query_states, key_states[:,:,128:self.prefill_len-128,:].transpose(2, 3)) / math.sqrt(self.head_dim)
-
         # upcast attention to fp32
 
         index = list(range(0, 128)) + list(range(self.prefill_len-128, key_states.shape[-2]))
@@ -598,12 +597,13 @@ def llama_attn_forward_MiniCache(
         #     print(sum_exp_attn_weights , (sum_exp_attn_weights + sum_exp_attn_weights_proximal + 1e-5))
         #     exit(0)
         # print(gate.mean())
-        gate[gate.isnan()] = 1
+
+        gate[gate.isnan()] = 0.9
         
         # Weighted sum of the outputs
-        # attn_output =  (1 - gate) * attn_output + gate * attn_output_proximal
+        attn_output =  (1 - gate) * attn_output + gate * attn_output_proximal
         # attn_output =   attn_output_proximal
-        attn_output =  0.1 * attn_output + 0.9 * attn_output_proximal
+        # attn_output =  0.1 * attn_output + 0.9 * attn_output_proximal
     else:
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
