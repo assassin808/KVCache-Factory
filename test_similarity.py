@@ -44,11 +44,11 @@ def calculate_attention_similarity(attn_weights1, attn_weights2):
     return similarity_matrix
 
 # Base layer
-base_layer = 19
+base_layer = 9
 base_attn_weights = attentions[base_layer]  # (batch_size, num_heads, seq_len, seq_len)
 
 # Comparison layers
-comparison_layers = [19, 5, 10, 15, 20, 25, 30]
+comparison_layers = [9, 5, 10, 15, 20, 25, 30]
 similarity_matrices_attn = {}
 
 # Calculate attention weight similarities
