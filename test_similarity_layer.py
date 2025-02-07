@@ -25,34 +25,22 @@ with torch.no_grad():
 attentions = outputs.attentions
 past_key_values = outputs.past_key_values
 
-def calculate_attention_output_similarity(base_attn_weights, base_values, comp_attn_weights, comp_values):
+def calculate_attention_output_similarity(attn_weights):
     # Remove batch dimension (assuming batch_size=1)
-    base_attn_weights = base_attn_weights.squeeze(0)  # (num_heads, seq_len, seq_len)
-    base_values = base_values.squeeze(0)              # (num_heads, seq_len, head_dim)
-    comp_attn_weights = comp_attn_weights.squeeze(0)
-    comp_values = comp_values.squeeze(0)
-    print(base_attn_weights.shape,base_values.shape)
-    
-    # Compute attention outputs: (num_heads, seq_len, head_dim)
-    base_output = torch.matmul(base_attn_weights, base_values)
-    comp_output = torch.matmul(comp_attn_weights, comp_values)
-    
-    # Flatten to (num_heads, seq_len * head_dim)
-    base_output = base_output.view(base_output.size(0), -1)
-    comp_output = comp_output.view(comp_output.size(0), -1)
-    
-    # Calculate cosine similarity between each head pair
-    num_base_heads = base_output.size(0)
-    num_comp_heads = comp_output.size(0)
-    similarity_matrix = torch.zeros(num_base_heads, num_comp_heads)
-    for i in range(num_base_heads):
-        for j in range(num_comp_heads):
-            similarity_matrix[i, j] = F.cosine_similarity(
-                base_output[i].unsqueeze(0), 
-                comp_output[j].unsqueeze(0), 
-                dim=1
-            ).item()
-    
+    seq_len = attn_weights.shape[-1]
+    similarity_matrix = torch.zeros(seq_len//4+4, seq_len//4+4)
+     # 遍历每个时间步的注意力权重
+    for i in range(0,seq_len,4):
+        print(i)
+        for j in range(0,seq_len,4):
+            # 提取第 i 个和第 j 个时间步的注意力权重
+            attn_i = attn_weights[0][:,  :,i]  # (num_heads, seq_len)
+            attn_j = attn_weights[0][:,  :,j]  # (num_heads, seq_len)
+
+            # 计算余弦相似性
+            similarity = F.cosine_similarity(attn_i, attn_j, dim=1).mean().item()
+            similarity_matrix[i//4, j//4] = similarity
+
     return similarity_matrix
 
 # Base layer (adjust index if needed)
@@ -61,15 +49,13 @@ base_attn_weights = attentions[base_layer]
 base_values = past_key_values[base_layer][1]  # past_key_values[layer][1] is the value tensor
 
 # Comparison layers
-comparison_layers = [4, 5, 10, 15, 20, 25, 30]
+comparison_layers = [4, 20]
 similarity_matrices = {}
-
+git
 for layer in comparison_layers:
     comp_attn_weights = attentions[layer]
     comp_values = past_key_values[layer][1]  # Get value state for the comparison layer
-    similarity_matrices[layer] = calculate_attention_output_similarity(
-        base_attn_weights, base_values, comp_attn_weights, comp_values
-    )
+    similarity_matrices[layer] = calculate_attention_output_similarity(attentions[layer])
 
 # Generate heatmaps
 num_plots = len(comparison_layers)
@@ -80,9 +66,9 @@ for i, layer in enumerate(comparison_layers):
     plt.imshow(similarity_matrices[layer].cpu(), cmap="viridis", vmin=-1, vmax=1)
     plt.colorbar(label="Cosine Similarity")
     plt.xlabel(f"Heads (Layer {layer})")
-    plt.ylabel(f"Heads (Layer {base_layer})")
+    plt.ylabel(f"Heads (Layer {layer})")
     plt.title(f"Attention Output Similarity\nLayer {base_layer} vs. {layer}")
 
 plt.tight_layout()
-plt.savefig("attention_output_similarity_heatmaps.png")
+plt.savefig("attention_similarity_heatmaps.png")
 print("Heatmaps saved to attention_output_similarity_heatmaps.png")
