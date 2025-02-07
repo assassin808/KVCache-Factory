@@ -381,18 +381,22 @@ class DynamicCache(Cache):
                 break
             if (j,seg,hj) in used_segment or (j,seg,hj) in replaced_segment or (i,seg,hi) in replaced_segment:
                 continue
-            # if j <= 0.2 * 32:
-            #     continue
-            # print('sim',i,j,hi,hj,_)
+            if j <= 2:
+                continue
+            # print('sim',i,j,hi,hj,_,s)
             self.layer_map.append(item)
             used_segment.add((i,seg,hi))
             replaced_segment.add((j,seg,hj))
             self.retained_key_cache[j][:, hj, 128:-128, :] = self.retained_key_cache[i][:, hi, 128:-128, :]
-            self.retained_value_cache[j][:, hj, 128:-128, :] = temp_value[i][:, hi, 128:-128, :]
+            # self.retained_value_cache[j][:, hj, 128:-128, :] = temp_value[i][:, hi, 128:-128, :]
             # self.retained_key_cache[j][:, :, -8:, :] = temp_key[j][:, :, -8:, :]
             # self.retained_key_cache[j][:, :, :8, :] = temp_key[j][:, :, :8, :]
             # self.retained_value_cache[j][:, :, -8:, :] = temp_value[i][:, :, -8:, :]
-
+        if layer_idx == 31:
+            counter = [0 for i in range(32)]
+            for item in self.layer_map:
+                counter[item[1]]+=1
+            print(counter)
         # del temp_key, temp_value
         # if layer_idx == 31:
         #     with open('layer_map.csv', 'w') as f:
