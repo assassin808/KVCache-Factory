@@ -236,6 +236,7 @@ class DynamicCache(Cache):
       self.query_cache = []
       self.decode_q = []
       self.layer_map = []
+      self.indices = []
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
         """
@@ -318,45 +319,58 @@ class DynamicCache(Cache):
             import torch.nn.functional as F
 
             for i in range(32):
+                prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                p = prev_segment[:, :, -1024//2:, list(range(0,self.retained_key_cache[0].shape[2],4))][0]  # [num_heads, seq_len, dim]
+                p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D]
                 for j in range(32):
                     if i >= j:
                         continue
 
-                    # Get query-key pairs for both layers
-                    prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                    p = prev_segment[:, :, -1024//2:, list(range(0,self.retained_key_cache[0].shape[2],4))][0]  # [num_heads, seq_len, dim]
-                    
+                    # Get query-key pairs for both layers 
                     segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
                     s = segment[:, :, -1024//2:, list(range(0,self.retained_key_cache[0].shape[2],4))][0]  # [num_heads, seq_len, dim]
 
+                    if attention_mask is not None:  # no matter the length, we just slice it
+                        causal_mask = attention_mask[:, :, :, :  self.retained_key_cache[i].shape[-2]]
+                        attn_weights = prev_segment + causal_mask
+                    attn_weights_sum = attn_weights[:, :, :, 128:-128 ].sum(dim = -2)
+                    indices = attn_weights_sum.topk(256, dim=-1).indices #[1,h,10]
+                    self.indices.append(indices.clone())
+                
+
                     # Calculate cross-head similarity matrix
-                    p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D]
                     s_expanded = s.unsqueeze(0)  # [1, H_j, S, D]
                     
                     # Compute cosine similarity and average over sequence
-                    del prev_segment, segment
-                    cosine_sim = F.cosine_similarity(p_expanded, s_expanded, dim=-1)
-                    cosine_sim_avg = cosine_sim.mean(dim=-1)  # [H_i, H_j]
-                    # Find best matches for each head in layer i
-                    for head_i in range(cosine_sim_avg.size(0)):
-                        for head_j in range(cosine_sim_avg.size(1)):
-                            sim = cosine_sim_avg[head_i][head_j].item()
+                    import random
+                    for head_i in range(32):
+                        for head_j in range(32):
+                            layer_map.append((i, j, 0, head_i, head_j, random.random(), 1))
+                    del segment
+                    # cosine_sim = F.cosine_similarity(p_expanded, s_expanded, dim=-1)
+                    # cosine_sim_avg = cosine_sim.mean(dim=-1)  # [H_i, H_j]
+                    # # Find best matches for each head in layer i
+
+                    # for head_i in range(cosine_sim_avg.size(0)):
+                    #     for head_j in range(cosine_sim_avg.size(1)):
+                    #         sim = cosine_sim_avg[head_i][head_j].item()
 
 
-                            # Calculate norm scaling for matched heads
-                            p_head = p[head_i]
-                            s_head = s[head_j]
-                            p_norm = p_head.norm(dim=-1).mean().item()
-                            s_norm = s_head.norm(dim=-1).mean().item()
-                            scaling = s_norm / p_norm if p_norm != 0 else 0.0
+                    #         # Calculate norm scaling for matched heads
+                    #         p_head = p[head_i]
+                    #         s_head = s[head_j]
+                    #         p_norm = p_head.norm(dim=-1).mean().item()
+                    #         s_norm = s_head.norm(dim=-1).mean().item()
+                    #         scaling = s_norm / p_norm if p_norm != 0 else 0.0
 
-                            # Store matched pair information
-                            if sim < 0.9:
-                                continue
-                            layer_map.append((i, j, 0, head_i, head_j, sim, scaling))
+                    #         # Store matched pair information
+                    #         if sim < 0.9:
+                    #             continue
+                    #         layer_map.append((i, j, 0, head_i, head_j, sim, scaling))
 
                     # Cleanup
-                    del  p, s, p_expanded, s_expanded
+                    del s,  s_expanded
+                del p, p_expanded
 
 
         layer_map.sort(key=lambda x:-x[-2])#from high to low
@@ -381,22 +395,24 @@ class DynamicCache(Cache):
                 break
             if (j,seg,hj) in used_segment or (j,seg,hj) in replaced_segment or (i,seg,hi) in replaced_segment:
                 continue
-            if j <= 2:
-                continue
+            # if j <= 2:
+            #     continue
             # print('sim',i,j,hi,hj,_,s)
             self.layer_map.append(item)
             used_segment.add((i,seg,hi))
             replaced_segment.add((j,seg,hj))
-            self.retained_key_cache[j][:, hj, 128:-128, :] = self.retained_key_cache[i][:, hi, 128:-128, :]
+            seq_len = self.retained_key_cache[j].shape[-2]
+            lis = list(self.indices[j][0][hj])
+            self.retained_key_cache[j][:, hj, list(range(128))+list(range(seq_len-128,seq_len))+lis, :] = self.retained_key_cache[i][:, hj, list(range(128))+list(range(seq_len-128,seq_len))+lis, :]
             # self.retained_value_cache[j][:, hj, 128:-128, :] = temp_value[i][:, hi, 128:-128, :]
             # self.retained_key_cache[j][:, :, -8:, :] = temp_key[j][:, :, -8:, :]
             # self.retained_key_cache[j][:, :, :8, :] = temp_key[j][:, :, :8, :]
             # self.retained_value_cache[j][:, :, -8:, :] = temp_value[i][:, :, -8:, :]
-        if layer_idx == 31:
-            counter = [0 for i in range(32)]
-            for item in self.layer_map:
-                counter[item[1]]+=1
-            print(counter)
+        # if layer_idx == 31:
+        #     counter = [0 for i in range(32)]
+        #     for item in self.layer_map:
+        #         counter[item[1]]+=1
+        #     print(counter)
         # del temp_key, temp_value
         # if layer_idx == 31:
         #     with open('layer_map.csv', 'w') as f:
@@ -513,6 +529,7 @@ class DynamicCache(Cache):
                 cache.mask_k.append(past_key_values[layer_idx][6])
                 cache.mask_v.append(past_key_values[layer_idx][7])
                 cache.layer_map = past_key_values[layer_idx][8]
+                cache.indices.append(past_key_values[layer_idx][9])
 
 
         return cache
@@ -531,7 +548,7 @@ class DynamicCache(Cache):
         backward compatibility."""
         legacy_cache = ()
         for layer_idx in range(len(self)):
-            legacy_cache += ((self.retained_key_cache[layer_idx],  self.retained_value_cache[layer_idx], self.key_unit_cache[layer_idx], self.value_unit_cache[layer_idx], self.key_magnitude[layer_idx], self.value_magnitude[layer_idx], self.mask_k[layer_idx], self.mask_v[layer_idx],self.layer_map,),)
+            legacy_cache += ((self.retained_key_cache[layer_idx],  self.retained_value_cache[layer_idx], self.key_unit_cache[layer_idx], self.value_unit_cache[layer_idx], self.key_magnitude[layer_idx], self.value_magnitude[layer_idx], self.mask_k[layer_idx], self.mask_v[layer_idx],self.layer_map, self.indices[layer_idx],),)
         return legacy_cache
 
     def crop(self, max_length: int):
