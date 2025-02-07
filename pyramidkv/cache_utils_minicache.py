@@ -452,7 +452,11 @@ class DynamicCache(Cache):
                     self.retained_key_cache[j][:, hj, 128:-128, :] = self.retained_key_cache[i][:, hi, 128:-128, :]
                     self.layer_map.append((i, j, seg, hi, hj, map_s[(u,pair_U[u])][0],map_s[(u,pair_U[u])][1]))
                     print('sim',i,j,hi,hj,map_s[(u,pair_U[u])][0],map_s[(u,pair_U[u])][1])
-
+        if layer_idx == 31:
+            counter  = [0 for i in range(32)]
+            for item in self.layer_map:
+                counter[item[1]]+=1
+            print(counter)
         # Rest of the code for cache updates
         self.key_unit_cache.append(None)
         self.value_unit_cache.append(None)
