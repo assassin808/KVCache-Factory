@@ -193,6 +193,81 @@ class CacheConfig:
         unused_kwargs = {key: value for key, value in kwargs.items() if key not in to_remove}
         return unused_kwargs
 
+import math
+import torch
+import torch.nn.functional as F
+from collections import defaultdict, deque
+
+class HopcroftKarp:
+    def __init__(self, graph, U_nodes, V_nodes):
+        self.graph = graph  # Bipartite graph represented as adjacency lists
+        self.U = U_nodes    # Left partition nodes
+        self.V = V_nodes    # Right partition nodes
+
+    def max_matching(self):
+        pair_U = {u: None for u in self.U}
+        pair_V = {v: None for v in self.V}
+        dist = {u: float('inf') for u in self.U}
+        result = 0
+
+        while self.bfs(pair_U, pair_V, dist):
+            for u in self.U:
+                if pair_U[u] is None:
+                    if self.dfs(u, pair_U, pair_V, dist):
+                        result += 1
+        return result
+
+    def bfs(self, pair_U, pair_V, dist):
+        queue = deque()
+        for u in self.U:
+            if pair_U[u] is None:
+                dist[u] = 0
+                queue.append(u)
+            else:
+                dist[u] = float('inf')
+        dist[None] = float('inf')
+
+        while queue:
+            u = queue.popleft()
+            if u is not None:
+                for v in self.graph[u]:
+                    if dist[pair_V.get(v)] == float('inf'):
+                        dist[pair_V.get(v)] = dist[u] + 1
+                        queue.append(pair_V.get(v))
+        return dist[None] != float('inf')
+
+    def dfs(self, u, pair_U, pair_V, dist):
+        if u is not None:
+            for v in self.graph[u]:
+                if dist[pair_V.get(v)] == dist[u] + 1:
+                    if self.dfs(pair_V.get(v), pair_U, pair_V, dist):
+                        pair_U[u] = v
+                        pair_V[v] = u
+                        return True
+            dist[u] = float('inf')
+            return False
+        return True
+
+def is_feasible(filtered_pairs, required_size=23*32):
+    # Build bipartite graph
+    left_nodes = set()
+    right_nodes = set()
+    graph = defaultdict(list)
+
+    for pair in filtered_pairs:
+        i, j, seg, hi, hj, _, _ = pair
+        u = (i, seg, hi)
+        v = (j, seg, hj)
+        graph[u].append(v)
+        left_nodes.add(u)
+        right_nodes.add(v)
+
+    # Perform Hopcroft-Karp algorithm
+    hk = HopcroftKarp(graph, left_nodes, right_nodes)
+    max_match = hk.max_matching()
+
+    return max_match >= required_size
+
 class DynamicCache(Cache):
     """
     A cache that grows dynamically as more tokens are generated. This is the default for generative models.
@@ -261,106 +336,107 @@ class DynamicCache(Cache):
         to the number of layers in the model.
         """
         return len(self.retained_key_cache)
+
+
     def update(
-        self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        layer_idx: int,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
-        hidden_states: torch.Tensor = None, 
-        query_states: torch.Tensor = None, 
-        attention_mask = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+            self,
+            key_states: torch.Tensor,
+            value_states: torch.Tensor,
+            layer_idx: int,
+            cache_kwargs: Optional[Dict[str, Any]] = None,
+            hidden_states: torch.Tensor = None, 
+            query_states: torch.Tensor = None, 
+            attention_mask = None,
+        ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
-
-        Parameters:
-            key_states (`torch.Tensor`):
-                The new key states to cache.
-            value_states (`torch.Tensor`):
-                The new value states to cache.
-            layer_idx (`int`):
-                The index of the layer to cache the states for.
-            cache_kwargs (`Dict[str, Any]`, `optional`):
-                Additional arguments for the cache subclass. No additional arguments are used in `DynamicCache`.
-            hidden_states (`torch.Tensor`, `optional`):
-                The hidden states for the layer `layer_idx`.
-
-        Return:
-            A tuple containing the updated key, value states and hidden states.
+        Optimized cache update with maximum minimal similarity approach.
         """
-        # Update the number of seen tokens
         if layer_idx == 0:
             self._seen_tokens += key_states.shape[-2]
 
-        # Update the cache
-        assert len(self.retained_key_cache) <= layer_idx
         self.retained_key_cache.append(key_states)
         self.retained_value_cache.append(value_states)
         self.hidden_states.append(None)
         self.query_cache.append(query_states)
 
-        layer_map = []
-
         if layer_idx == 31:
+            all_pairs = []
             num_segments = 1
             segment_size = self.retained_key_cache[0].shape[2] // num_segments
-            attn_lis = []
-            # with open('layer_map.csv', 'r') as f:
-            #     layer_map = []
-            #     for line in f:
-            #         layer_map.append([i for i in line.strip().split(',')])
-            #         for i in range(5):
-            #             layer_map[-1][i] = int(layer_map[-1][i])
-            #         layer_map[-1][5] = float(layer_map[-1][5])
-            #         layer_map[-1][6] = float(layer_map[-1][6])
-            import math
-            import torch.nn.functional as F
 
+            # Precompute all possible pairs
             for i in range(32):
                 for j in range(32):
                     if i >= j:
                         continue
 
-                    # Get query-key pairs for both layers
+                    # Compute attention matrices for layers i and j
                     prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
                     p = prev_segment[:, :, -1024//2:, list(range(0,self.retained_key_cache[0].shape[2],4))][0]  # [num_heads, seq_len, dim]
                     
                     segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
                     s = segment[:, :, -1024//2:, list(range(0,self.retained_key_cache[0].shape[2],4))][0]  # [num_heads, seq_len, dim]
 
-                    # Calculate cross-head similarity matrix
-                    p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D]
-                    s_expanded = s.unsqueeze(0)  # [1, H_j, S, D]
-                    
-                    # Compute cosine similarity and average over sequence
-                    del prev_segment, segment
-                    cosine_sim = F.cosine_similarity(p_expanded, s_expanded, dim=-1)
-                    cosine_sim_avg = cosine_sim.mean(dim=-1)  # [H_i, H_j]
-                    # Find best matches for each head in layer i
-                    for head_i in range(cosine_sim_avg.size(0)):
-                        for head_j in range(cosine_sim_avg.size(1)):
-                            sim = cosine_sim_avg[head_i][head_j].item()
-
-
-                            # Calculate norm scaling for matched heads
+                    # Compute similarity for all head pairs
+                    for head_i in range(p.shape[0]):
+                        for head_j in range(s.shape[0]):
                             p_head = p[head_i]
                             s_head = s[head_j]
                             p_norm = p_head.norm(dim=-1).mean().item()
                             s_norm = s_head.norm(dim=-1).mean().item()
                             scaling = s_norm / p_norm if p_norm != 0 else 0.0
+                            cosine_sim = F.cosine_similarity(p_head.unsqueeze(0), s_head.unsqueeze(1), dim=-1).mean().item()
+                            all_pairs.append( (i, j, 0, head_i, head_j, cosine_sim, scaling) )
 
-                            # Store matched pair information
-                            if sim < 0.9:
-                                continue
-                            layer_map.append((i, j, 0, head_i, head_j, sim, scaling))
+            # Binary search for maximum minimal similarity
+            all_pairs_sorted = sorted(all_pairs, key=lambda x: x[5])  # Sort by similarity
+            low = 0
+            high = len(all_pairs_sorted) - 1
+            best_index = 0
 
-                    # Cleanup
-                    del  p, s, p_expanded, s_expanded
+            while low <= high:
+                mid = (low + high) // 2
+                current_S = all_pairs_sorted[mid][5]
+                filtered_pairs = [pair for pair in all_pairs if pair[5] >= current_S]
+                if is_feasible(filtered_pairs):
+                    best_index = mid
+                    low = mid + 1
+                else:
+                    high = mid - 1
 
+            best_s = all_pairs_sorted[best_index][5]
+            filtered_pairs = [pair for pair in all_pairs if pair[5] >= best_s]
 
-        layer_map.sort(key=lambda x:-x[-2])#from high to low
+            # Build bipartite graph for best_s and find maximum matching
+            graph = defaultdict(list)
+            left_nodes = set()
+            right_nodes = set()
+            map_s = {}
 
+            for pair in filtered_pairs:
+                i, j, seg, hi, hj, sim, scaling = pair
+                u = (i, seg, hi)
+                v = (j, seg, hj)
+                map_s[(u,v)] = (sim, scaling)
+                graph[u].append(v)
+                left_nodes.add(u)
+                right_nodes.add(v)
+
+            hk = HopcroftKarp(graph, left_nodes, right_nodes)
+            pair_U = hk.max_matching()
+
+            # Update the cache based on the maximum matching
+            replaced_segment = set()
+            for u in left_nodes:
+                if pair_U[u] is not None and len(replaced_segment) < 23*32:
+                    i, seg, hi = u
+                    j, _, hj = pair_U[u]
+                    replaced_segment.add( (j, seg, hj) )
+                    self.retained_key_cache[j][:, hj, 128:-128, :] = self.retained_key_cache[i][:, hi, 128:-128, :]
+                    self.layer_map.append((i, j, seg, hi, hj, map_s[(u,pair_U[u])][0],map_s[(u,pair_U[u])][1]))
+                    print('sim',map_s[(u,pair_U[u])][0])
+
+        # Rest of the code for cache updates
         self.key_unit_cache.append(None)
         self.value_unit_cache.append(None)
         self.key_magnitude.append(None)
@@ -368,47 +444,7 @@ class DynamicCache(Cache):
         self.mask_k.append(None)
         self.mask_v.append(None)
 
-
-        ret_value = (self.retained_key_cache[layer_idx].clone(), self.retained_value_cache[layer_idx].clone(), self.hidden_states[layer_idx])
-
-        temp_key = [i.clone() for i in self.retained_key_cache]
-        temp_value = [i.clone() for i in self.retained_value_cache]
-        used_segment = set()
-        replaced_segment = set()
-        for item in layer_map:
-            i, j, seg,hi,hj, _, s = item
-            if len(replaced_segment)>= 23 * 32:
-                break
-            if (j,seg,hj) in used_segment or (j,seg,hj) in replaced_segment or (i,seg,hi) in replaced_segment:
-                continue
-            # if j <= 0.2 * 32:
-            #     continue
-            # print('sim',i,j,hi,hj,_)
-            self.layer_map.append(item)
-            used_segment.add((i,seg,hi))
-            replaced_segment.add((j,seg,hj))
-            self.retained_key_cache[j][:, hj, 128:-128, :] = self.retained_key_cache[i][:, hi, 128:-128, :]
-            self.retained_value_cache[j][:, hj, 128:-128, :] = temp_value[i][:, hi, 128:-128, :]
-            # self.retained_key_cache[j][:, :, -8:, :] = temp_key[j][:, :, -8:, :]
-            # self.retained_key_cache[j][:, :, :8, :] = temp_key[j][:, :, :8, :]
-            # self.retained_value_cache[j][:, :, -8:, :] = temp_value[i][:, :, -8:, :]
-
-        # del temp_key, temp_value
-        # if layer_idx == 31:
-        #     with open('layer_map.csv', 'w') as f:
-        #         for item in self.layer_map:
-        #             f.write(','.join([str(i) for i in item]) + '\n')
-        #     exit(0)
-        # with open('layer_map.csv', 'r') as f:
-        #     layer_map = []
-        #     for line in f:
-        #         layer_map.append([i for i in line.strip().split(',')])
-        #         for i in range(5):
-        #             layer_map[-1][i] = int(layer_map[-1][i])
-        #         layer_map[-1][5] = float(layer_map[-1][5])
-        #         layer_map[-1][6] = float(layer_map[-1][6])
-                
-        return ret_value[0], ret_value[1], ret_value[2]
+        return (self.retained_key_cache[layer_idx].clone(), self.retained_value_cache[layer_idx].clone(), self.hidden_states[layer_idx])
     def update_miniCache(
             self,
             key_states: torch.Tensor,
