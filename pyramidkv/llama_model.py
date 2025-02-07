@@ -636,34 +636,6 @@ def llama_attn_forward_MiniCache(
         attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
     else:
         attn_output = self.o_proj(attn_output)
-        if self.layer_idx == 0 or self.layer_idx == 15 or self.layer_idx == 30:
-            import matplotlib.pyplot as plt
-
-            # Example parameters (adjust based on your model)
-            d = 128   # Head dimension
-            h = 32    # Number of attention heads
-            # Assuming `self.o_proj.weight` is a PyTorch tensor and you want to move it to CPU
-            weight = abs(self.o_proj.weight.cpu())  # Convert to NumPy array for plotting
-
-            # Reshape and average blocks
-            # Ensure the reshaping is correct based on the dimensions of `weight`
-            averaged_weights = weight.reshape(h, d, h, d).mean(axis=(1, 3))  # Shape: [h, h]
-
-            # Define the range for the color bar
-            # vmin = 0.0  # Minimum value for the color bar
-            # vmax = 1.0  # Maximum value for the color bar
-
-            # Plot the averaged weights
-            plt.figure(figsize=(10, 8))  # Set the figure size for better visualization
-            plt.imshow(averaged_weights, cmap='viridis')  # Use a colormap and set the color bar range
-            plt.colorbar()  # Add a color bar to the plot
-            plt.title("Averaged Head Interactions in Output Projection")
-            plt.xlabel("Head Index (Output)")
-            plt.ylabel("Head Index (Input)")
-
-            # Save the plot to a file
-            plt.savefig(f"o_proj_layer_{self.layer_idx}.png")
-            plt.close()  # Close the plot to free up memory
 
     if not output_attentions:
         attn_weights = None

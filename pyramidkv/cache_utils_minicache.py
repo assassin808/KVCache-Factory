@@ -198,6 +198,29 @@ import torch
 import torch.nn.functional as F
 from collections import defaultdict, deque
 
+def is_feasible(filtered_pairs, required_size=23*32):
+    # Build bipartite graph
+    left_nodes = set()
+    right_nodes = set()
+    graph = defaultdict(list)
+
+    for pair in filtered_pairs:
+        i, j, seg, hi, hj, _, _ = pair
+        u = (i, seg, hi)
+        v = (j, seg, hj)
+        graph[u].append(v)
+        left_nodes.add(u)
+        right_nodes.add(v)
+
+    # Perform Hopcroft-Karp algorithm
+    hk = HopcroftKarp(graph, left_nodes, right_nodes)
+    pair_U, pair_V = hk.max_matching()
+
+    # Calculate the number of edges in the maximum matching
+    max_match = sum(1 for u in pair_U if pair_U[u] is not None)
+
+    return max_match >= required_size
+
 class HopcroftKarp:
     def __init__(self, graph, U_nodes, V_nodes):
         self.graph = graph  # Bipartite graph represented as adjacency lists
@@ -205,8 +228,8 @@ class HopcroftKarp:
         self.V = V_nodes    # Right partition nodes
 
     def max_matching(self):
-        pair_U = {u: None for u in self.U}
-        pair_V = {v: None for v in self.V}
+        pair_U = {u: None for u in self.U}  # Maps left nodes to right nodes
+        pair_V = {v: None for v in self.V}  # Maps right nodes to left nodes
         dist = {u: float('inf') for u in self.U}
         result = 0
 
@@ -215,7 +238,7 @@ class HopcroftKarp:
                 if pair_U[u] is None:
                     if self.dfs(u, pair_U, pair_V, dist):
                         result += 1
-        return result
+        return pair_U, pair_V  # Return the pairing dictionaries
 
     def bfs(self, pair_U, pair_V, dist):
         queue = deque()
@@ -247,27 +270,6 @@ class HopcroftKarp:
             dist[u] = float('inf')
             return False
         return True
-
-def is_feasible(filtered_pairs, required_size=23*32):
-    # Build bipartite graph
-    left_nodes = set()
-    right_nodes = set()
-    graph = defaultdict(list)
-
-    for pair in filtered_pairs:
-        i, j, seg, hi, hj, _, _ = pair
-        u = (i, seg, hi)
-        v = (j, seg, hj)
-        graph[u].append(v)
-        left_nodes.add(u)
-        right_nodes.add(v)
-
-    # Perform Hopcroft-Karp algorithm
-    hk = HopcroftKarp(graph, left_nodes, right_nodes)
-    max_match = hk.max_matching()
-
-    return max_match >= required_size
-
 class DynamicCache(Cache):
     """
     A cache that grows dynamically as more tokens are generated. This is the default for generative models.
@@ -366,6 +368,7 @@ class DynamicCache(Cache):
 
             # Precompute all possible pairs
             for i in range(32):
+                print(i)
                 for j in range(32):
                     if i >= j:
                         continue
@@ -378,15 +381,29 @@ class DynamicCache(Cache):
                     s = segment[:, :, -1024//2:, list(range(0,self.retained_key_cache[0].shape[2],4))][0]  # [num_heads, seq_len, dim]
 
                     # Compute similarity for all head pairs
-                    for head_i in range(p.shape[0]):
-                        for head_j in range(s.shape[0]):
+                    cosine_sim = F.cosine_similarity(p.unsqueeze(1), s.unsqueeze(0), dim=-1)
+                    cosine_sim_avg = cosine_sim.mean(dim=-1)  # [H_i, H_j]
+                    # Find best matches for each head in layer i
+                    # for head_i in range(32):
+                    #     for head_j in range(32):
+                    for head_i in range(cosine_sim_avg.size(0)):
+                        for head_j in range(cosine_sim_avg.size(1)):
+                            sim = cosine_sim_avg[head_i][head_j].item()
+
+
+                            # Calculate norm scaling for matched heads
                             p_head = p[head_i]
                             s_head = s[head_j]
                             p_norm = p_head.norm(dim=-1).mean().item()
                             s_norm = s_head.norm(dim=-1).mean().item()
                             scaling = s_norm / p_norm if p_norm != 0 else 0.0
-                            cosine_sim = F.cosine_similarity(p_head.unsqueeze(0), s_head.unsqueeze(1), dim=-1).mean().item()
-                            all_pairs.append( (i, j, 0, head_i, head_j, cosine_sim, scaling) )
+
+                            # Store matched pair information
+                            if sim < 0.9:
+                                continue
+                            all_pairs.append( (i, j, 0, head_i, head_j, sim, scaling) )
+                            # import random
+                            # all_pairs.append( (i, j, 0, head_i, head_j, random.random(), 1) )
 
             # Binary search for maximum minimal similarity
             all_pairs_sorted = sorted(all_pairs, key=lambda x: x[5])  # Sort by similarity
@@ -423,7 +440,7 @@ class DynamicCache(Cache):
                 right_nodes.add(v)
 
             hk = HopcroftKarp(graph, left_nodes, right_nodes)
-            pair_U = hk.max_matching()
+            pair_U, pair_V = hk.max_matching()
 
             # Update the cache based on the maximum matching
             replaced_segment = set()
@@ -434,7 +451,7 @@ class DynamicCache(Cache):
                     replaced_segment.add( (j, seg, hj) )
                     self.retained_key_cache[j][:, hj, 128:-128, :] = self.retained_key_cache[i][:, hi, 128:-128, :]
                     self.layer_map.append((i, j, seg, hi, hj, map_s[(u,pair_U[u])][0],map_s[(u,pair_U[u])][1]))
-                    print('sim',map_s[(u,pair_U[u])][0])
+                    print('sim',i,j,hi,hj,map_s[(u,pair_U[u])][0],map_s[(u,pair_U[u])][1])
 
         # Rest of the code for cache updates
         self.key_unit_cache.append(None)
