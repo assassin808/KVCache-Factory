@@ -321,34 +321,35 @@ class DynamicCache(Cache):
 
             for i in range(32):
                 # print(i)
-                prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                p = prev_segment[:, :, -1024//2:, list(range(0,self.retained_key_cache[0].shape[2],2))][0]  # [num_heads, seq_len, dim]
-                p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D]
+                # prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                # p = prev_segment[:, :, -1024//2:, list(range(0,self.retained_key_cache[0].shape[2],2))][0]  # [num_heads, seq_len, dim]
+                # p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D]
+                p_expanded = self.projs[i](self.value_cache[i])[0].unsqueeze(1)
                 for j in range(32):
                     if i >= j:
                         continue
 
                     # Get query-key pairs for both layers 
-                    segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                    s = segment[:, :, -1024//2:, list(range(0,self.retained_key_cache[0].shape[2],2))][0]  # [num_heads, seq_len, dim]
+                    # segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                    # s = segment[:, :, -1024//2:, list(range(0,self.retained_key_cache[0].shape[2],2))][0]  # [num_heads, seq_len, dim]
 
-                    if attention_mask is not None:  # no matter the length, we just slice it
-                        causal_mask = attention_mask[:, :, :, :  self.retained_key_cache[i].shape[-2]]
-                        attn_weights = prev_segment + causal_mask
-                    attn_weights_sum = attn_weights[:, :, :, 128:-128 ].sum(dim = -2)
-                    indices = attn_weights_sum.topk(256, dim=-1).indices + 128 #[1,h,10]
-                    self.indices.append(indices.clone())
+                    # if attention_mask is not None:  # no matter the length, we just slice it
+                    #     causal_mask = attention_mask[:, :, :, :  self.retained_key_cache[i].shape[-2]]
+                    #     attn_weights = prev_segment + causal_mask
+                    # attn_weights_sum = attn_weights[:, :, :, 128:-128 ].sum(dim = -2)
+                    # indices = attn_weights_sum.topk(256, dim=-1).indices + 128 #[1,h,10]
+                    # self.indices.append(indices.clone())
                 
 
                     # # Calculate cross-head similarity matrix
                     s_expanded = s.unsqueeze(0)  # [1, H_j, S, D]
-                    
+                    s_expanded = self.projs[i](self.value_cache[i])[0].unsqueeze(0)
                     # Compute cosine similarity and average over sequence
                     # import random
                     # for head_i in range(32):
                     #     for head_j in range(32):
                     #         layer_map.append((i, j, 0, head_i, head_j, random.random(), 1))
-                    del segment
+                    # del segment
                     cosine_sim = F.cosine_similarity(p_expanded, s_expanded, dim=-1)
                     cosine_sim_avg = cosine_sim.mean(dim=-1)  # [H_i, H_j]
                     # Find best matches for each head in layer i
@@ -366,13 +367,13 @@ class DynamicCache(Cache):
                             scaling = s_norm / p_norm if p_norm != 0 else 0.0
 
                             # Store matched pair information
-                            if sim < 0.9:
-                                continue
+                            # if sim < 0.9:
+                            #     continue
                             layer_map.append((i, j, 0, head_i, head_j, sim, scaling))
 
                     # Cleanup
-                    del s,  s_expanded
-                del p, p_expanded
+                #     del s,  s_expanded
+                # del p, p_expanded
 
 
         layer_map.sort(key=lambda x:-x[-2])#from high to low
