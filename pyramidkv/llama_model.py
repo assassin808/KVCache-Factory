@@ -549,6 +549,7 @@ def llama_attn_forward_MiniCache(
             self.kv_seq_len += q_len
             key_states, value_states = past_key_value.update_miniCache_decode(key_states, value_states, self.layer_idx, self.config.num_hidden_layers, cache_kwargs)
             past_key_value.decode_q.append(query_states.clone())
+            past_key_value.projs.append(self.o_proj)
             # print(past_key_value.decode_q)
             for item in past_key_value.layer_map:
                 # print(item, len(past_key_value.decode_q)-1)
@@ -581,10 +582,20 @@ def llama_attn_forward_MiniCache(
         # Gather the unselected indices
         unselected_all_indices = unselected_mask.nonzero(as_tuple=True)[-1].view(1, key_states.shape[1], -1)
         del unselected_mask, mask, combined_range_indices
-        print(key_states[:,:,unselected_all_indices,:].shape)
 
-        attn_weights = torch.matmul(query_states, key_states[:,:,unselected_all_indices,:].transpose(2, 3)) / math.sqrt(self.head_dim)
-        attn_weights_proximal = torch.matmul(query_states_old, key_states[:,:,all_indices,:].transpose(2, 3)) / math.sqrt(self.head_dim)
+        expanded_indices = all_indices.unsqueeze(-1).expand(-1, -1, -1, 128)
+        un_expanded_indices = unselected_all_indices.unsqueeze(-1).expand(-1, -1, -1, 128)
+
+        # Use gather to select the key states
+        selected_key_states = torch.gather(key_states, 2, expanded_indices)
+        unselected_key_states  = torch.gather(key_states, 2, un_expanded_indices)
+        # print(selected_key_states.shape,unselected_key_states.shape)
+
+        selected_value_states = torch.gather(value_states, 2, expanded_indices)
+        unselected_value_states  = torch.gather(value_states, 2, un_expanded_indices)
+
+        attn_weights = torch.matmul(query_states, unselected_key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        attn_weights_proximal = torch.matmul(query_states_old, selected_key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
        
 
@@ -598,13 +609,13 @@ def llama_attn_forward_MiniCache(
         # print(query_states.sum().isnan(),key_states[:,:,128:self.prefill_len-128,:].sum().isnan())
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        attn_output = torch.matmul(attn_weights, value_states[:,:,unselected_all_indices,:])
+        attn_output = torch.matmul(attn_weights, unselected_value_states)
 
         
         # print(sum_exp_attn_weights_proximal.sum().isnan(),sum_exp_attn_weights.sum().isnan())
         attn_weights_proximal = nn.functional.softmax(attn_weights_proximal, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_weights_proximal = nn.functional.dropout(attn_weights_proximal, p=self.attention_dropout, training=self.training)
-        attn_output_proximal = torch.matmul(attn_weights_proximal, value_states[:,:,all_indices,:])
+        attn_output_proximal = torch.matmul(attn_weights_proximal, selected_value_states)
         # print(sum_exp_attn_weights.mean(), sum_exp_attn_weights_proximal.mean())
         # Compute the gate
         gate = sum_exp_attn_weights_proximal / (sum_exp_attn_weights + sum_exp_attn_weights_proximal)
