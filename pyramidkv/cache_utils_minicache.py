@@ -380,8 +380,7 @@ class DynamicCache(Cache):
             self.retained_value_cache[layer_idx] = value_states
 
             self.retained_key_cache[layer_idx-1] = previous_key_states
-            self.retained_value_cache[layer_idx-1] = previous_value_states
-
+            self.retained_value
     def update_miniCache_decode(self,
         key_states: torch.Tensor,
         value_states: torch.Tensor,

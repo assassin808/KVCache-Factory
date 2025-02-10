@@ -9,10 +9,10 @@ import csv
 # /models--meta-llama--Llama-2-7b-chat-hf/snapshots/f5db02db724555f92da89c216ac04704f23d4590/
 # /models--meta-llama--Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659/
 tokenizer = AutoTokenizer.from_pretrained(
-    "/root/autodl-tmp/models--meta-llama--Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659/"
+    "/root/autodl-tmp/models--meta-llama--Llama-2-7b-chat-hf/snapshots/f5db02db724555f92da89c216ac04704f23d4590/"
 )
 model = AutoModelForCausalLM.from_pretrained(
-    "/root/autodl-tmp/models--meta-llama--Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659/",
+    "/root/autodl-tmp/models--meta-llama--Llama-2-7b-chat-hf/snapshots/f5db02db724555f92da89c216ac04704f23d4590/",
 )
 
 
@@ -48,7 +48,7 @@ for layer_idx in range(num_layers):
     # Flatten and store
     layer_outputs.append(past_key_values[layer_idx][1])  # Flatten to (seq_len * head_dim,)
 
-def cosine_similarity_matching_heads(v1, v2):
+def cosine_similarity_matching_heads(v1, v2, i, j):
     """
     Compute the cosine similarity between v1 and v2 by matching the most similar heads.
 
@@ -63,6 +63,17 @@ def cosine_similarity_matching_heads(v1, v2):
     assert v1.shape == v2.shape, "Input tensors must have the same shape"
     assert v1.shape[0] == 1, "Batch size must be 1"
     # assert v1.shape[1] == 32, "Number of heads must be 32"
+    seq_len = v1.shape[-2]
+
+    proj_o1 = model.model.layers[i].self_attn.o_proj
+    proj_o2 = model.model.layers[j].self_attn.o_proj
+    v1 = v1.transpose(1, 2).contiguous()
+    v1 = proj_o1(v1.reshape(1, seq_len, 128*32))
+    v2 = v2.transpose(1, 2).contiguous()
+    v2 = proj_o2(v2.reshape(1, seq_len, 128*32))
+    v1 = v1.view(1, seq_len, 32, 128).transpose(1, 2)
+    v2 = v2.view(1, seq_len, 32, 128).transpose(1, 2)
+    
 
     # Reshape the tensors to [32, n, 128] by removing the batch dimension
     v1 = v1.squeeze(0)  # Shape: [32, n, 128]
@@ -72,17 +83,21 @@ def cosine_similarity_matching_heads(v1, v2):
     # Reshape v1 to [32, 1, n, 128] and v2 to [1, 32, n, 128] for broadcasting
     v1_expanded = v1.unsqueeze(1)  # Shape: [32, 1, n, 128]
     v2_expanded = v2.unsqueeze(0)  # Shape: [1, 32, n, 128]
+    print(v2_expanded.shape)
+
+    
 
     # Compute cosine similarity along the last dimension (n, 128)
     cosine_sim = F.cosine_similarity(v1_expanded, v2_expanded, dim=-1)  # Shape: [32, 32, n]
-
+    print(cosine_sim.shape)
     # Average over the sequence length (n) to get head-wise similarity
     cosine_sim = cosine_sim.mean(dim=-1)  # Shape: [32, 32]
-
+    print(cosine_sim.shape)
+    # avg_similarity = cosine_sim.item()
     # Find the best matching head for each head in v1
     max_sim, _ = torch.max(cosine_sim, dim=1)  # Shape: [32]
-
-    # Average the similarity scores of the best matching heads
+    print(max_sim, _)
+    # # Average the similarity scores of the best matching heads
     avg_similarity = max_sim.mean().item()
 
     return avg_similarity
@@ -91,7 +106,7 @@ def cosine_similarity_matching_heads(v1, v2):
 similarity_matrix = torch.zeros((num_layers, num_layers))
 for i in range(num_layers):
     for j in range(num_layers):
-        similarity_matrix[i, j] = cosine_similarity_matching_heads( layer_outputs[i], layer_outputs[j])
+        similarity_matrix[i, j] = cosine_similarity_matching_heads( layer_outputs[i], layer_outputs[j],i,j)
 
 # Plot similarity matrix
 plt.figure(figsize=(12, 10))
