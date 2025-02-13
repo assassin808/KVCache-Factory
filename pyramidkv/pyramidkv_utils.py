@@ -639,48 +639,57 @@ class H2OKVCluster():
         self.pooling = pooling
         self.merge = merge
 
-    def greedy_algorithm(self, a, b, v, c):
-        """
-        Greedy algorithm for binary optimization.
-        
-        Args:
-            a (np.array): Vector of a_i values.
-            b (np.array): Vector of b_i values.
-            v (np.array): Matrix of v_i vectors (columns).
-            c (float): Constraint on the sum of w_i.
-        
-        Returns:
-            w (np.array): Binary solution vector.
-        """
-        n = len(a)
-        w = np.zeros(n, dtype=int)  # Initialize all w_i to 0
-        residual = a.copy()  # Residual vector: a - w_i b_i v_i
-        
-        for _ in range(int(c)):  # Add up to c ones
-            best_idx = -1
-            best_norm = np.inf
-            
-            # Find the best index to set w_i = 1
-            for i in range(n):
-                if w[i] == 0:  # Only consider indices where w_i is 0
-                    candidate_residual = residual - b[i] * v[:, i]
-                    candidate_norm = np.linalg.norm(candidate_residual)
-                    
-                    if candidate_norm < best_norm:
-                        best_norm = candidate_norm
-                        best_idx = i
-            
-            if best_idx == -1:
-                break  # No more improvement possible
-            
-            # Set w_i = 1 and update the residual
-            w[best_idx] = 1
-            residual -= b[best_idx] * v[:, best_idx]
-        
-        return w
+    def compute_w(self, a, b, V, c):
+    """
+    Compute the optimal w using the given formula.
 
+    Parameters:
+        V (np.ndarray): Matrix with columns v_i (shape: d x n).
+        a (np.ndarray): Vector a_i (shape: n x 1).
+        b (np.ndarray): Vector b_i (shape: n x 1).
+        c (float): Constraint value for sum(w_i) < c.
 
-    def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups, query_states_compress = None):
+    Returns:
+        w (np.ndarray): Optimal w vector (shape: n x 1).
+    """
+    # Ensure inputs are numpy arrays
+    V = np.array(V)
+    a = np.array(a).reshape(-1, 1)
+    b = np.array(b).reshape(-1, 1)
+
+    # Compute B (diagonal matrix of b_i)
+    B = np.diag(b.flatten())
+
+    # Compute V^T V
+    VTV = V.T @ V
+
+    # Compute (B V^T V B)^{-1}
+    BVTVB = B @ VTV @ B
+    BVTVB_inv = np.linalg.inv(BVTVB)
+
+    # Compute B V^T V a
+    BVTVA = B @ VTV @ a
+
+    # Compute the unconstrained solution w_star
+    w_star = BVTVB_inv @ BVTVA
+
+    # Compute the numerator and denominator for the adjustment term
+    numerator = np.sum(w_star) - c
+    denominator = np.sum(BVTVB_inv)
+
+    # Compute the adjustment term
+    adjustment = (numerator / denominator) * BVTVB_inv @ np.ones_like(b)
+
+    # Compute the final w
+    w = w_star - adjustment
+
+    return w
+
+    def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups):
+        key_states = key_states[0:1,:,:,:]
+        value_states = value_states[0:1,:,:,:]
+        # query_states = query_states[0:1,:,:,:]
+
         
         # check if prefix phase
         assert key_states.shape[-2] == query_states.shape[-2]
@@ -691,6 +700,27 @@ class H2OKVCluster():
         if q_len < self.max_capacity_prompt:
             return key_states, value_states
         else:
+
+            attn_weights = torch.matmul(query_states[..., -self.window_size:, :], key_states.transpose(2, 3)) / math.sqrt(head_dim)
+            
+            mask = torch.full((self.window_size, self.window_size), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
+            mask_cond = torch.arange(mask.size(-1), device=attn_weights.device)
+            mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
+            mask = mask.to(attn_weights.device)
+            attention_mask = mask[None, None, :, :]
+            
+
+            attn_weights[:, :, -self.window_size:, -self.window_size:] += attention_mask
+
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights_sum = attn_weights[:, :, -self.window_size:, : -self.window_size].sum(dim = -2)
+            # [1,h,1,m] * [1,h,m,d]
+            if query_states.shape[0] != 1:
+                w = self.compute_w(attn_weights_sum[0:1,:,:], attn_weights_sum[1:2,:,:], value_states[:, :, : -self.window_size, :], self.max_capacity_prompt)
+                print(w)
+
+
+
             attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim)
             mask = torch.full((self.window_size, self.window_size), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
             mask_cond = torch.arange(mask.size(-1), device=attn_weights.device)
@@ -702,6 +732,8 @@ class H2OKVCluster():
 
             attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
             attn_weights_sum = attn_weights[:, :, :, : -self.window_size].sum(dim = -2)
+
+
             # if self.pooling == 'avgpool':
             #     attn_cache = F.avg_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
             # elif self.pooling == 'maxpool':
