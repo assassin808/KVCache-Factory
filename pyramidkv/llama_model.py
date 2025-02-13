@@ -1399,8 +1399,13 @@ def llama_attn_forward_H2O(
     position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    flag = False
+    query_states_compress = None
+    if hidden_states.shape[0] == 2:
+        hidden_states, hidden_states_compress = hidden_states[0], hidden_states[1]
+        flag = True
     bsz, q_len, _ = hidden_states.size()
-
+       
     init_H2O(self)
 
     if self.config.pretraining_tp > 1:
@@ -1424,10 +1429,16 @@ def llama_attn_forward_H2O(
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
+        if flag:
+            query_states_compress = self.q_proj(hidden_states_compress)
 
     query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
     key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
     value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+    if flag:
+        query_states_compress = query_states_compress.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+   
 
     kv_seq_len = key_states.shape[-2]
     # if past_key_value is not None:
@@ -1460,14 +1471,15 @@ def llama_attn_forward_H2O(
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
-
+    if flag:
+        query_states_compress, key_states = apply_rotary_pos_emb(query_states_compress, key_states, cos, sin)
     if past_key_value is not None:
         # sin and cos are specific to RoPE models; cache_position needed for the static cache
         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
 
         if key_states.shape[-2] == kv_seq_len:
             self.kv_seq_len = kv_seq_len
-            key_states_compress, value_states_compress = self.kv_cluster.update_kv(key_states, query_states, value_states, attention_mask, self.num_key_value_groups)
+            key_states_compress, value_states_compress = self.kv_cluster.update_kv(key_states, query_states, value_states, attention_mask, self.num_key_value_groups, query_states_compress)
             past_key_value.update(key_states_compress, value_states_compress, self.layer_idx, cache_kwargs)
         else:
             self.kv_seq_len += q_len
@@ -1476,15 +1488,21 @@ def llama_attn_forward_H2O(
 
 
     attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+    attn_weights_compress = torch.matmul(query_states, key_states_compress.transpose(2, 3)) / math.sqrt(self.head_dim)
 
     if attention_mask is not None:  # no matter the length, we just slice it
         causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
         attn_weights = attn_weights + causal_mask
+        attn_weights_compress = attn_weights_compress + attention_mask[:, :, :, : key_states_compress.shape[-2]]
 
     # upcast attention to fp32
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
     attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
     attn_output = torch.matmul(attn_weights, value_states)
+
+    attn_weights_compress = nn.functional.softmax(attn_weights_compress, dim=-1, dtype=torch.float32).to(query_states.dtype)
+    attn_weights_compress = nn.functional.dropout(attn_weights_compress, p=self.attention_dropout, training=self.training)
+    attn_output_compress = torch.matmul(attn_weights_compress, value_states_compress)
 
     if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
         raise ValueError(
@@ -1496,17 +1514,22 @@ def llama_attn_forward_H2O(
 
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
+    attn_output_compress = attn_output_compress.transpose(1, 2).contiguous()
+    attn_output_compress = attn_output_compress.reshape(bsz, q_len, self.hidden_size)
+
+
     if self.config.pretraining_tp > 1:
         attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
         o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
         attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
     else:
         attn_output = self.o_proj(attn_output)
-
+        attn_output_compress = self.o_proj(attn_output_compress)
+    
     if not output_attentions:
         attn_weights = None
-
-    return attn_output, attn_weights, past_key_value
+    
+    return torch.concat((attn_output,attn_output_compress),dim=1), attn_weights, past_key_value
 
 
 def llama_sdpa_attn_forward_H2O(

@@ -639,7 +639,48 @@ class H2OKVCluster():
         self.pooling = pooling
         self.merge = merge
 
-    def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups):
+    def greedy_algorithm(self, a, b, v, c):
+        """
+        Greedy algorithm for binary optimization.
+        
+        Args:
+            a (np.array): Vector of a_i values.
+            b (np.array): Vector of b_i values.
+            v (np.array): Matrix of v_i vectors (columns).
+            c (float): Constraint on the sum of w_i.
+        
+        Returns:
+            w (np.array): Binary solution vector.
+        """
+        n = len(a)
+        w = np.zeros(n, dtype=int)  # Initialize all w_i to 0
+        residual = a.copy()  # Residual vector: a - w_i b_i v_i
+        
+        for _ in range(int(c)):  # Add up to c ones
+            best_idx = -1
+            best_norm = np.inf
+            
+            # Find the best index to set w_i = 1
+            for i in range(n):
+                if w[i] == 0:  # Only consider indices where w_i is 0
+                    candidate_residual = residual - b[i] * v[:, i]
+                    candidate_norm = np.linalg.norm(candidate_residual)
+                    
+                    if candidate_norm < best_norm:
+                        best_norm = candidate_norm
+                        best_idx = i
+            
+            if best_idx == -1:
+                break  # No more improvement possible
+            
+            # Set w_i = 1 and update the residual
+            w[best_idx] = 1
+            residual -= b[best_idx] * v[:, best_idx]
+        
+        return w
+
+
+    def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups, query_states_compress = None):
         
         # check if prefix phase
         assert key_states.shape[-2] == query_states.shape[-2]
