@@ -309,7 +309,7 @@ class SnapKVCluster():
         assert key_states.shape[-2] == query_states.shape[-2]
         bsz, num_heads, q_len, head_dim = query_states.shape
         
-        print(f"SnapKV max_capacity_prompt {self.max_capacity_prompt}")
+        print(f"SnapKV max_capacity_prompt {self.max_capacity_prompt}, {self.window_size}")
         
         if q_len < self.max_capacity_prompt:
             return key_states, value_states
