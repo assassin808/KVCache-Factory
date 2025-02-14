@@ -375,10 +375,10 @@ class DynamicCache(Cache):
 
                     # Compute attention matrices for layers i and j
                     prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                    p = prev_segment[:, :, -1024//2:, list(range(0,self.retained_key_cache[0].shape[2],4))][0]  # [num_heads, seq_len, dim]
+                    p = prev_segment[:, :, -1024//2:, :-1024//2][0]  # [num_heads, seq_len, dim]
                     
                     segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                    s = segment[:, :, -1024//2:, list(range(0,self.retained_key_cache[0].shape[2],4))][0]  # [num_heads, seq_len, dim]
+                    s = segment[:, :, -1024//2:, :-1024//2][0]  # [num_heads, seq_len, dim]
 
                     # Compute similarity for all head pairs
                     cosine_sim = F.cosine_similarity(p.unsqueeze(1), s.unsqueeze(0), dim=-1)
