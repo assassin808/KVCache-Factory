@@ -572,19 +572,32 @@ def llama_attn_forward_MiniCache(
         combined_range_indices = torch.tensor(index, dtype=torch.long, device = layer_indices.device).unsqueeze(0).unsqueeze(0)
         combined_range_indices = combined_range_indices.expand(1, layer_indices.size(1), len(index))
         all_indices = torch.cat([layer_indices, combined_range_indices], dim=-1)
-        mask = torch.zeros((1, key_states.shape[1], key_states.shape[2]), dtype=torch.bool, device=key_states.device)
-        mask.scatter_(2, all_indices, True)  # Mark the selected indices as True
 
-        # Invert the mask to get the unselected indices
-        unselected_mask = ~mask
+        index_expanded = all_indices.unsqueeze(-1).expand(-1, -1, -1, key_states.shape[-1])
+        selected_keys = torch.gather(key_states, dim=2, index=index_expanded)
+        selected_values = torch.gather(value_states, dim=2, index=index_expanded)
 
-        # Gather the unselected indices
-        unselected_all_indices = unselected_mask.nonzero(as_tuple=True)[-1].view(1, key_states.shape[1], -1)
-        del unselected_mask, mask, combined_range_indices
-        print(key_states[:,:,unselected_all_indices,:].shape)
+        mask = torch.zeros(1, 32, key_states.shape[2], dtype=torch.bool, device=key_states.device)
+        mask.scatter_(dim=2, index=all_indices, value=True)
 
-        attn_weights = torch.matmul(query_states, key_states[:,:,unselected_all_indices,:].transpose(2, 3)) / math.sqrt(self.head_dim)
-        attn_weights_proximal = torch.matmul(query_states_old, key_states[:,:,all_indices,:].transpose(2, 3)) / math.sqrt(self.head_dim)
+        unselected_keys_list = []
+        unselected_values_list = []
+        for head_idx in range(32):
+            head_mask = mask[0, head_idx]  # [n]
+            head_keys = key_states[0, head_idx]  # [n, d]
+            head_values = value_states[0, head_idx]  # [n, d]
+            unselected_head = head_keys[~head_mask]  # [remaining, d]
+            unselected_head_v = head_values[~head_mask]  # [remaining, d]
+            unselected_keys_list.append(unselected_head.unsqueeze(0))
+            unselected_values_list.append(unselected_head_v.unsqueeze(0))
+
+        # Stack and reshape to [1, 32, remaining, d]
+        unselected_keys = torch.cat(unselected_keys_list, dim=0).unsqueeze(0)
+        unselected_values = torch.cat(unselected_values_list, dim=0).unsqueeze(0)
+
+
+        attn_weights = torch.matmul(query_states, unselected_keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+        attn_weights_proximal = torch.matmul(query_states_old, selected_keys.transpose(2, 3)) / math.sqrt(self.head_dim)
 
        
 
@@ -598,13 +611,13 @@ def llama_attn_forward_MiniCache(
         # print(query_states.sum().isnan(),key_states[:,:,128:self.prefill_len-128,:].sum().isnan())
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        attn_output = torch.matmul(attn_weights, value_states[:,:,unselected_all_indices,:])
+        attn_output = torch.matmul(attn_weights, unselected_values)
 
         
         # print(sum_exp_attn_weights_proximal.sum().isnan(),sum_exp_attn_weights.sum().isnan())
         attn_weights_proximal = nn.functional.softmax(attn_weights_proximal, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_weights_proximal = nn.functional.dropout(attn_weights_proximal, p=self.attention_dropout, training=self.training)
-        attn_output_proximal = torch.matmul(attn_weights_proximal, value_states[:,:,all_indices,:])
+        attn_output_proximal = torch.matmul(attn_weights_proximal, selected_values)
         # print(sum_exp_attn_weights.mean(), sum_exp_attn_weights_proximal.mean())
         # Compute the gate
         gate = sum_exp_attn_weights_proximal / (sum_exp_attn_weights + sum_exp_attn_weights_proximal)

@@ -342,31 +342,31 @@ class DynamicCache(Cache):
                     s_expanded = s.unsqueeze(0)  # [1, H_j, S, D]
                     
                     # Compute cosine similarity and average over sequence
-                    import random
-                    for head_i in range(32):
-                        for head_j in range(32):
-                            layer_map.append((i, j, 0, head_i, head_j, random.random(), 1))
-                    del segment
-                    # cosine_sim = F.cosine_similarity(p_expanded, s_expanded, dim=-1)
-                    # cosine_sim_avg = cosine_sim.mean(dim=-1)  # [H_i, H_j]
-                    # # Find best matches for each head in layer i
+                    # import random
+                    # for head_i in range(32):
+                    #     for head_j in range(32):
+                    #         layer_map.append((i, j, 0, head_i, head_j, random.random(), 1))
+                    # del segment
+                    cosine_sim = F.cosine_similarity(p_expanded, s_expanded, dim=-1)
+                    cosine_sim_avg = cosine_sim.mean(dim=-1)  # [H_i, H_j]
+                    # Find best matches for each head in layer i
 
-                    # for head_i in range(cosine_sim_avg.size(0)):
-                    #     for head_j in range(cosine_sim_avg.size(1)):
-                    #         sim = cosine_sim_avg[head_i][head_j].item()
+                    for head_i in range(cosine_sim_avg.size(0)):
+                        for head_j in range(cosine_sim_avg.size(1)):
+                            sim = cosine_sim_avg[head_i][head_j].item()
 
 
-                    #         # Calculate norm scaling for matched heads
-                    #         p_head = p[head_i]
-                    #         s_head = s[head_j]
-                    #         p_norm = p_head.norm(dim=-1).mean().item()
-                    #         s_norm = s_head.norm(dim=-1).mean().item()
-                    #         scaling = s_norm / p_norm if p_norm != 0 else 0.0
+                            # Calculate norm scaling for matched heads
+                            p_head = p[head_i]
+                            s_head = s[head_j]
+                            p_norm = p_head.norm(dim=-1).mean().item()
+                            s_norm = s_head.norm(dim=-1).mean().item()
+                            scaling = s_norm / p_norm if p_norm != 0 else 0.0
 
-                    #         # Store matched pair information
-                    #         if sim < 0.9:
-                    #             continue
-                    #         layer_map.append((i, j, 0, head_i, head_j, sim, scaling))
+                            # Store matched pair information
+                            # if sim < 0.9:
+                            #     continue
+                            layer_map.append((i, j, 0, head_i, head_j, sim, scaling))
 
                     # Cleanup
                     del s,  s_expanded
