@@ -640,50 +640,50 @@ class H2OKVCluster():
         self.merge = merge
 
     def compute_w(self, a, b, V, c):
-    """
-    Compute the optimal w using the given formula.
+        """
+        Compute the optimal w using the given formula.
 
-    Parameters:
-        V (np.ndarray): Matrix with columns v_i (shape: d x n).
-        a (np.ndarray): Vector a_i (shape: n x 1).
-        b (np.ndarray): Vector b_i (shape: n x 1).
-        c (float): Constraint value for sum(w_i) < c.
+        Parameters:
+            V (np.ndarray): Matrix with columns v_i (shape: d x n).
+            a (np.ndarray): Vector a_i (shape: n x 1).
+            b (np.ndarray): Vector b_i (shape: n x 1).
+            c (float): Constraint value for sum(w_i) < c.
 
-    Returns:
-        w (np.ndarray): Optimal w vector (shape: n x 1).
-    """
-    # Ensure inputs are numpy arrays
-    V = np.array(V)
-    a = np.array(a).reshape(-1, 1)
-    b = np.array(b).reshape(-1, 1)
+        Returns:
+            w (np.ndarray): Optimal w vector (shape: n x 1).
+        """
+        # Ensure inputs are numpy arrays
+        V = np.array(V)
+        a = np.array(a).reshape(-1, 1)
+        b = np.array(b).reshape(-1, 1)
 
-    # Compute B (diagonal matrix of b_i)
-    B = np.diag(b.flatten())
+        # Compute B (diagonal matrix of b_i)
+        B = np.diag(b.flatten())
 
-    # Compute V^T V
-    VTV = V.T @ V
+        # Compute V^T V
+        VTV = V.T @ V
 
-    # Compute (B V^T V B)^{-1}
-    BVTVB = B @ VTV @ B
-    BVTVB_inv = np.linalg.inv(BVTVB)
+        # Compute (B V^T V B)^{-1}
+        BVTVB = B @ VTV @ B
+        BVTVB_inv = np.linalg.inv(BVTVB)
 
-    # Compute B V^T V a
-    BVTVA = B @ VTV @ a
+        # Compute B V^T V a
+        BVTVA = B @ VTV @ a
 
-    # Compute the unconstrained solution w_star
-    w_star = BVTVB_inv @ BVTVA
+        # Compute the unconstrained solution w_star
+        w_star = BVTVB_inv @ BVTVA
 
-    # Compute the numerator and denominator for the adjustment term
-    numerator = np.sum(w_star) - c
-    denominator = np.sum(BVTVB_inv)
+        # Compute the numerator and denominator for the adjustment term
+        numerator = np.sum(w_star) - c
+        denominator = np.sum(BVTVB_inv)
 
-    # Compute the adjustment term
-    adjustment = (numerator / denominator) * BVTVB_inv @ np.ones_like(b)
+        # Compute the adjustment term
+        adjustment = (numerator / denominator) * BVTVB_inv @ np.ones_like(b)
 
-    # Compute the final w
-    w = w_star - adjustment
+        # Compute the final w
+        w = w_star - adjustment
 
-    return w
+        return w
 
     def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups):
         key_states = key_states[0:1,:,:,:]
