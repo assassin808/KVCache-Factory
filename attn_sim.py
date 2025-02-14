@@ -25,9 +25,11 @@ with torch.no_grad():
     outputs = model(**tokenized_input, output_attentions=True, use_cache=True)
 
 attentions = outputs.attentions  # List of (batch_size, num_heads, seq_len, seq_len) tensors
+past_key_values = outputs.past_key_values 
 
 # Calculate average attention per layer (on GPU)
-layer_attentions = [attn[0][0] for attn in attentions]  # List of (seq_len, seq_len) tensors
+layer_attentions_head = [attn[0][17] for attn in attentions] 
+layer_attentions = [attn[0][2] for attn in attentions]  # List of (seq_len, seq_len) tensors
 num_layers = len(layer_attentions)
 seq_len = layer_attentions[0].size(0)
 
@@ -50,29 +52,45 @@ for i in range(num_layers):
             best_pair = (i, j)
 
 # Calculate token-level similarity for best layer pair (on GPU)
-l1, l2 = 7,11
+l1, l2 = 4,7
 token_sims = []
 attn_weight_sum_l1 = []
 attn_weight_sum_l2 = []
+token_sims_p = []
 for i in range(seq_len):
-    row_i_l1 = layer_attentions[l1][i, :].flatten()
-    row_i_l2 = layer_attentions[l2][i, :].flatten()
+    row_i_l1 = layer_attentions[l1][-32:, i].flatten()
+    row_i_l2 = layer_attentions_head[l2][-32:, i].flatten()
+    key_i_l1 = past_key_values[l1][0][0][2][i,:].flatten()
+    key_i_l2 = past_key_values[l2][0][0][17][i,:].flatten()
+
+    row_i_l1_p = layer_attentions_head[7][-32:, i].flatten()
+    row_i_l2_p = layer_attentions_head[11][-32:, i].flatten()
+    sim_p = torch.dot(row_i_l1_p, row_i_l2_p) / (torch.norm(row_i_l1_p) * torch.norm(row_i_l2_p))
+
+    sim_k = torch.dot(key_i_l1, key_i_l2) / (torch.norm(key_i_l1) * torch.norm(key_i_l2))
+
+
     sim = torch.dot(row_i_l1, row_i_l2) / (torch.norm(row_i_l1) * torch.norm(row_i_l2))
-    print(sim)
+    
     token_sims.append(sim)
-    attn_weight_sum_l1.append(layer_attentions[l1][i, :].sum(dim=-1).item())
-    attn_weight_sum_l2.append(layer_attentions[l2][i, :].sum(dim=-1).item())
+    temp = layer_attentions[l1][i, :].sum(dim=-1) * layer_attentions[l2][i,:].sum(dim=-1)
+    print(sim,sim_k)
+    token_sims_p.append(sim_k)
+    attn_weight_sum_l1.append(layer_attentions[l1][-16:, i].sum(dim=-1))
+    attn_weight_sum_l2.append(layer_attentions[l2][-16:, i].sum(dim=-1))
 
 token_sims_matrix = torch.stack(token_sims).reshape(1, -1)  # Shape (1, seq_len)
 attn_weight_sum_l1_matrix = torch.stack(attn_weight_sum_l1).reshape(1, -1)  # Shape (1, seq_len)
 attn_weight_sum_l2_matrix = torch.stack(attn_weight_sum_l2).reshape(1, -1)  # Shape (1, seq_len)
+token_sims_p_matrix = torch.stack(token_sims_p).reshape(1, -1)  # Shape (1, seq_len)
 
 # Move data to CPU for plotting
 layer_sim_matrix = layer_sim_matrix.cpu().numpy()
 token_sims_matrix = token_sims_matrix.cpu().numpy()
 attn_weight_sum_l2_matrix = attn_weight_sum_l2_matrix.cpu().numpy()
 attn_weight_sum_l1_matrix = attn_weight_sum_l1_matrix.cpu().numpy()
-
+token_sims_p_matrix = token_sims_p_matrix.cpu().numpy()
+# print(token_sims_p_matrix)
 # Create combined plot
 fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, figsize=(20, 5))
 
@@ -94,17 +112,19 @@ ax2.set_xticks(range(0, seq_len, max(1, seq_len//10)))
 fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
 
 # Attention weight sum heatmap
-im3 = ax3.imshow(attn_weight_sum_l1_matrix, cmap='viridis', aspect='auto')
+im3 = ax3.imshow(token_sims_p_matrix, cmap='viridis', aspect='auto', vmin=0, vmax=1)
 ax3.set_title(f'Attention Weight Sum (Layer {l1})', fontsize=14)
 ax3.set_xlabel('Token Position', fontsize=12)
 ax3.set_yticks([])
 ax3.set_xticks(range(0, seq_len, max(1, seq_len//10)))
+fig.colorbar(im3, ax=ax3)
 
-im4 = ax4.imshow(attn_weight_sum_l2_matrix, cmap='viridis', aspect='auto')
+im4 = ax4.imshow(attn_weight_sum_l1_matrix, cmap='viridis', aspect='auto', vmin=0, vmax=1)
 ax4.set_title(f'Attention Weight Sum (Layer {l2})', fontsize=14)
 ax4.set_xlabel('Token Position', fontsize=12)
 ax4.set_yticks([])
 ax4.set_xticks(range(0, seq_len, max(1, seq_len//10)))
+fig.colorbar(im4, ax=ax4)
 
 
 plt.tight_layout()
