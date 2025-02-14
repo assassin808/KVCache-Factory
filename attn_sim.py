@@ -27,7 +27,7 @@ with torch.no_grad():
 attentions = outputs.attentions  # List of (batch_size, num_heads, seq_len, seq_len) tensors
 
 # Calculate average attention per layer (on GPU)
-layer_attentions = [attn[0].mean(dim=0) for attn in attentions]  # List of (seq_len, seq_len) tensors
+layer_attentions = [attn[0][0] for attn in attentions]  # List of (seq_len, seq_len) tensors
 num_layers = len(layer_attentions)
 seq_len = layer_attentions[0].size(0)
 
@@ -50,19 +50,27 @@ for i in range(num_layers):
             best_pair = (i, j)
 
 # Calculate token-level similarity for best layer pair (on GPU)
-l1, l2 = best_pair
+l1, l2 = 7,11
 token_sims = []
+attn_weight_sum_l1 = []
 for i in range(seq_len):
     row_i_l1 = layer_attentions[l1][i, :].flatten()
     row_i_l2 = layer_attentions[l2][i, :].flatten()
     sim = torch.dot(row_i_l1, row_i_l2) / (torch.norm(row_i_l1) * torch.norm(row_i_l2))
+    print(sim)
     token_sims.append(sim)
+    attn_weight_sum_l1.append(layer_attentions[l1][i, :].sum(dim=-1).item())
+    attn_weight_sum_l2.append(layer_attentions[l2][i, :].sum(dim=-1).item())
 
 token_sims_matrix = torch.stack(token_sims).reshape(1, -1)  # Shape (1, seq_len)
+attn_weight_sum_l1_matrix = torch.stack(attn_weight_sum_l1).reshape(1, -1)  # Shape (1, seq_len)
+attn_weight_sum_l2_matrix = torch.stack(attn_weight_sum_l2).reshape(1, -1)  # Shape (1, seq_len)
 
 # Move data to CPU for plotting
 layer_sim_matrix = layer_sim_matrix.cpu().numpy()
 token_sims_matrix = token_sims_matrix.cpu().numpy()
+attn_weight_sum_l2_matrix = attn_weight_sum_l2_matrix.cpu().numpy()
+attn_weight_sum_l1_matrix = attn_weight_sum_l1_matrix.cpu().numpy()
 
 # Create combined plot
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
