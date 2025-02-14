@@ -297,7 +297,7 @@ class DynamicCache(Cache):
 
         if layer_idx == 31:
             # Define the segment sizes
-            segment_sizes = [4, 3, 2]  # 4:3:2 ratio
+            segment_sizes =list(range(50,1,-1))  # 4:3:2 ratio
             total_size = self.retained_key_cache[0].shape[2]
             
             # Calculate the start and end indices for each segment
@@ -339,7 +339,7 @@ class DynamicCache(Cache):
         replaced_segment = set()
         for item in layer_map:
             i, j, seg, _ = item
-            if len(replaced_segment)>=len(segment_sizes) * 8:
+            if len(replaced_segment)>=len(segment_sizes) * 12:
                 break
             if (j,seg) in used_segment or (j,seg) in replaced_segment or (i,seg) in used_segment or (i,seg) in replaced_segment:
                 continue
