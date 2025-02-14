@@ -1,7 +1,7 @@
 # export CUDA_VISIBLE_DEVICES=$1
 
 method="minicache" # Support PyramidKV, SnapKV, H2O, StreamingLLM, CAM, L2Norm, ThinK
-max_capacity_prompts=2048 # 128,2048 in paper
+max_capacity_prompts=256 # 128,2048 in paper
 attn_implementation="eager" # Support "flash_attention_2", "sdpa", "eager".
 source_path="./"
 model_path="/root/autodl-tmp/models--meta-llama--Llama-2-7b-chat-hf/snapshots/f5db02db724555f92da89c216ac04704f23d4590"

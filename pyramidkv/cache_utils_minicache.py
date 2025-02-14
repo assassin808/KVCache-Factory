@@ -302,75 +302,90 @@ class DynamicCache(Cache):
         self.query_cache.append(query_states)
 
         layer_map = []
+        sink_size = 16
+        window_size = 8
 
         if layer_idx == 31:
             num_segments = 1
             segment_size = self.retained_key_cache[0].shape[2] // num_segments
             attn_lis = []
-            # with open('layer_map.csv', 'r') as f:
-            #     layer_map = []
-            #     for line in f:
-            #         layer_map.append([i for i in line.strip().split(',')])
-            #         for i in range(5):
-            #             layer_map[-1][i] = int(layer_map[-1][i])
-            #         layer_map[-1][5] = float(layer_map[-1][5])
-            #         layer_map[-1][6] = float(layer_map[-1][6])
+            attn_diff = {}
+            with open('layer_map.csv', 'r') as f:
+                layer_map = []
+                for line in f:
+                    layer_map.append([i for i in line.strip().split(',')])
+                    for i in range(5):
+                        layer_map[-1][i] = int(layer_map[-1][i])
+                    layer_map[-1][5] = float(layer_map[-1][5])
+                    layer_map[-1][6] = float(layer_map[-1][6])
             import math
             import torch.nn.functional as F
 
             for i in range(32):
+                attn_diff[i] = None
                 prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                p = prev_segment[:, :, -1024//2:, list(range(0,self.retained_key_cache[0].shape[2],4))][0]  # [num_heads, seq_len, dim]
+                p = prev_segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
                 p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D]
+                if attention_mask is not None:  # no matter the length, we just slice it
+                        causal_mask = attention_mask[:, :, :, :  self.retained_key_cache[i].shape[-2]]
+                        attn_weights = prev_segment + causal_mask
+                    
+                attn_weights_sum_prev = attn_weights[:, :, -sink_size:, sink_size:-window_size ].sum(dim = -2)
+                indices = attn_weights_sum_prev.topk(256-window_size-sink_size, dim=-1).indices + sink_size #[1,h,10]
                 for j in range(32):
-                    if i >= j:
-                        continue
+                    # if i >= j:
+                    #     continue
 
                     # Get query-key pairs for both layers 
                     segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                    s = segment[:, :, -1024//2:, list(range(0,self.retained_key_cache[0].shape[2],4))][0]  # [num_heads, seq_len, dim]
+                    s = segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
 
                     if attention_mask is not None:  # no matter the length, we just slice it
                         causal_mask = attention_mask[:, :, :, :  self.retained_key_cache[i].shape[-2]]
-                        attn_weights = prev_segment + causal_mask
-                    attn_weights_sum = attn_weights[:, :, :, 128:-128 ].sum(dim = -2)
-                    indices = attn_weights_sum.topk(256, dim=-1).indices #[1,h,10]
-                    self.indices.append(indices.clone())
-                
+                        attn_weights = segment + causal_mask
+                    
+                    attn_weights_sum = attn_weights[:, :, -sink_size:, sink_size:-window_size ].sum(dim = -2)
+                    diff = abs((attn_weights_sum_prev-attn_weights_sum)/attn_weights_sum_prev)
+                    if attn_diff[i] == None:
+                        attn_diff[i] = diff
+                    else:
+                        attn_diff[i] += diff
 
                     # Calculate cross-head similarity matrix
-                    s_expanded = s.unsqueeze(0)  # [1, H_j, S, D]
+                    # s_expanded = s.unsqueeze(0)  # [1, H_j, S, D]
                     
-                    # Compute cosine similarity and average over sequence
-                    # import random
-                    # for head_i in range(32):
-                    #     for head_j in range(32):
-                    #         layer_map.append((i, j, 0, head_i, head_j, random.random(), 1))
-                    # del segment
-                    cosine_sim = F.cosine_similarity(p_expanded, s_expanded, dim=-1)
-                    cosine_sim_avg = cosine_sim.mean(dim=-1)  # [H_i, H_j]
-                    # Find best matches for each head in layer i
+                    # # Compute cosine similarity and average over sequence
+                    # # import random
+                    # # for head_i in range(32):
+                    # #     for head_j in range(32):
+                    # #         layer_map.append((i, j, 0, head_i, head_j, random.random(), 1))
+                    # # del segment
+                    # cosine_sim = F.cosine_similarity(p_expanded, s_expanded, dim=-1)
+                    # cosine_sim_avg = cosine_sim.mean(dim=-1)  # [H_i, H_j]
+                    # # Find best matches for each head in layer i
 
-                    for head_i in range(cosine_sim_avg.size(0)):
-                        for head_j in range(cosine_sim_avg.size(1)):
-                            sim = cosine_sim_avg[head_i][head_j].item()
+                    # for head_i in range(cosine_sim_avg.size(0)):
+                    #     for head_j in range(cosine_sim_avg.size(1)):
+                    #         sim = cosine_sim_avg[head_i][head_j].item()
 
 
-                            # Calculate norm scaling for matched heads
-                            p_head = p[head_i]
-                            s_head = s[head_j]
-                            p_norm = p_head.norm(dim=-1).mean().item()
-                            s_norm = s_head.norm(dim=-1).mean().item()
-                            scaling = s_norm / p_norm if p_norm != 0 else 0.0
+                    #         # Calculate norm scaling for matched heads
+                    #         p_head = p[head_i]
+                    #         s_head = s[head_j]
+                    #         p_norm = p_head.norm(dim=-1).mean().item()
+                    #         s_norm = s_head.norm(dim=-1).mean().item()
+                    #         scaling = s_norm / p_norm if p_norm != 0 else 0.0
 
-                            # Store matched pair information
-                            # if sim < 0.9:
-                            #     continue
-                            layer_map.append((i, j, 0, head_i, head_j, sim, scaling))
+                    #         # Store matched pair information
+                    #         # if sim < 0.9:
+                    #         #     continue
+                    #         layer_map.append((i, j, 0, head_i, head_j, sim, scaling))
 
-                    # Cleanup
-                    del s,  s_expanded
-                del p, p_expanded
+                    # # Cleanup
+                #     del s,  s_expanded
+                # del p, p_expanded
+                indices = (attn_diff[i] * attn_weights_sum_prev).topk(256-window_size-sink_size, dim=-1).indices + sink_size
+                self.indices.append(indices.clone())
 
 
         layer_map.sort(key=lambda x:-x[-2])#from high to low
@@ -389,25 +404,74 @@ class DynamicCache(Cache):
         temp_value = [i.clone() for i in self.retained_value_cache]
         used_segment = set()
         replaced_segment = set()
-        for item in layer_map:
-            i, j, seg,hi,hj, _, s = item
-            if len(replaced_segment)>= 23 * 32:
-                break
-            if (j,seg,hj) in used_segment or (j,seg,hj) in replaced_segment or (i,seg,hi) in replaced_segment:
-                continue
-            # if j <= 2:
-            #     continue
-            # print('sim',i,j,hi,hj,_,s)
-            self.layer_map.append(item)
-            used_segment.add((i,seg,hi))
-            replaced_segment.add((j,seg,hj))
-            seq_len = self.retained_key_cache[j].shape[-2]
-            lis = list(self.indices[j][0][hj])
-            self.retained_key_cache[j][:, hj, list(range(128))+list(range(seq_len-128,seq_len))+lis, :] = self.retained_key_cache[i][:, hj, list(range(128))+list(range(seq_len-128,seq_len))+lis, :]
-            # self.retained_value_cache[j][:, hj, 128:-128, :] = temp_value[i][:, hi, 128:-128, :]
-            # self.retained_key_cache[j][:, :, -8:, :] = temp_key[j][:, :, -8:, :]
-            # self.retained_key_cache[j][:, :, :8, :] = temp_key[j][:, :, :8, :]
-            # self.retained_value_cache[j][:, :, -8:, :] = temp_value[i][:, :, -8:, :]
+        # Collect all indices and values for batched updates
+        if layer_idx == 31:
+            sink_indices = torch.arange(0, sink_size, device=self.retained_key_cache[0].device)
+            window_indices = torch.arange(self.retained_key_cache[0].shape[-2] - window_size, self.retained_key_cache[0].shape[-2], device=self.retained_key_cache[0].device)
+            combined_indices = torch.cat([sink_indices, window_indices])
+            i_list, j_list, hi_list, hj_list, lis_list = [], [], [], [], []
+            for item in layer_map:
+                i, j, seg, hi, hj, _, s = item
+                self.layer_map.append(item)
+                i_list.append(i)
+                j_list.append(j)
+                hi_list.append(hi)
+                hj_list.append(hj)
+                lis_list.append(self.indices[j][0][hj])
+
+            # Convert lists to tensors
+            i_tensor = torch.tensor(i_list, device=self.retained_key_cache[0].device)
+            j_tensor = torch.tensor(j_list, device=self.retained_key_cache[0].device)
+            hi_tensor = torch.tensor(hi_list, device=self.retained_key_cache[0].device)
+            hj_tensor = torch.tensor(hj_list, device=self.retained_key_cache[0].device)
+            lis_tensor = torch.stack(lis_list)  # Shape: [num_items, M]
+
+            # Perform batched updates
+            for idx, (i, j, hi, hj, lis) in enumerate(zip(i_tensor, j_tensor, hi_tensor, hj_tensor, lis_tensor)):
+                self.retained_key_cache[j][:, hj, :, :] = self.retained_key_cache[i][:, hi, :, :]
+                update_indices = torch.cat([combined_indices, lis])
+                self.retained_key_cache[j][:, hj, update_indices, :] = temp_key[j][:, hj, update_indices, :]
+                # self.retained_value_cache[j][:, hj, 128:-128, :] = temp_value[i][:, hi, 128:-128, :]
+                # self.retained_key_cache[j][:, :, -8:, :] = temp_key[j][:, :, -8:, :]
+                # self.retained_key_cache[j][:, :, :8, :] = temp_key[j][:, :, :8, :]
+                # self.retained_value_cache[j][:, :, -8:, :] = temp_value[i][:, :, -8:, :]
+
+        if layer_idx == 31:
+            device = self.retained_key_cache[0].device
+            # Convert lists to tensors (example shapes)
+            retained_keys = torch.stack(self.retained_key_cache)  # Shape: [32, 1, H, N, D]
+            retained_values = torch.stack(self.retained_value_cache)
+            layer_indices = torch.stack(self.indices)  # Shape: [32, 1, H, M]
+            diff_layer = torch.stack(attn_diff)
+
+            # Precompute combined_range for all layers
+            seq_len = retained_keys.shape[-2]
+            combined_range = torch.cat([
+                torch.arange(0, sink_size, device=device),
+                torch.arange(seq_len - window_size, seq_len, device=device)
+            ])
+            combined_range = combined_range.view(1, 1, 1, -1).expand(32, 1, layer_indices.size(2), -1)
+
+            # Concatenate indices and gather
+            all_indices = torch.cat([layer_indices, combined_range], dim=-1)
+            index_expanded = all_indices.unsqueeze(-1).expand(-1, -1, -1, -1, retained_keys.size(-1))
+            selected_keys = torch.gather(retained_keys, 3, index_expanded)
+            selected_values = torch.gather(retained_values, 3, index_expanded)
+            diff_selected = torch.gather(diff_layer, 3, all_indices.unsqueeze(-1).expand(-1, -1, -1, diff_layer.size(-1)))
+
+            # Create mask and unselected entries
+            mask = torch.ones((32, 1, layer_indices.size(2), seq_len), dtype=torch.bool, device=device)
+            mask.scatter_(3, all_indices, False)
+            unselected_keys = retained_keys[mask].view(32, 1, layer_indices.size(2), -1, retained_keys.size(-1))
+            unselected_values = retained_values[mask].view(32, 1, layer_indices.size(2), -1, retained_values.size(-1))
+
+            # Update caches in-place
+            for j in range(32):
+                self.key_unit_cache[j] = unselected_keys[j]
+                self.value_unit_cache[j] = unselected_values[j]
+                self.retained_key_cache[j] = selected_keys[j]
+                self.retained_value_cache[j] = selected_values[j]
+
         # if layer_idx == 31:
         #     counter = [0 for i in range(32)]
         #     for item in self.layer_map:

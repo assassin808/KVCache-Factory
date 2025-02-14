@@ -566,34 +566,10 @@ def llama_attn_forward_MiniCache(
         # print(self.prefill_len-8)
 
         # upcast attention to fp32
-
-        layer_indices = past_key_value.indices[self.layer_idx]
-        index = list(range(0, 128)) + list(range(self.prefill_len-128, key_states.shape[-2]))
-        combined_range_indices = torch.tensor(index, dtype=torch.long, device = layer_indices.device).unsqueeze(0).unsqueeze(0)
-        combined_range_indices = combined_range_indices.expand(1, layer_indices.size(1), len(index))
-        all_indices = torch.cat([layer_indices, combined_range_indices], dim=-1)
-
-        index_expanded = all_indices.unsqueeze(-1).expand(-1, -1, -1, key_states.shape[-1])
-        selected_keys = torch.gather(key_states, dim=2, index=index_expanded)
-        selected_values = torch.gather(value_states, dim=2, index=index_expanded)
-
-        mask = torch.zeros(1, 32, key_states.shape[2], dtype=torch.bool, device=key_states.device)
-        mask.scatter_(dim=2, index=all_indices, value=True)
-
-        unselected_keys_list = []
-        unselected_values_list = []
-        for head_idx in range(32):
-            head_mask = mask[0, head_idx]  # [n]
-            head_keys = key_states[0, head_idx]  # [n, d]
-            head_values = value_states[0, head_idx]  # [n, d]
-            unselected_head = head_keys[~head_mask]  # [remaining, d]
-            unselected_head_v = head_values[~head_mask]  # [remaining, d]
-            unselected_keys_list.append(unselected_head.unsqueeze(0))
-            unselected_values_list.append(unselected_head_v.unsqueeze(0))
-
-        # Stack and reshape to [1, 32, remaining, d]
-        unselected_keys = torch.cat(unselected_keys_list, dim=0).unsqueeze(0)
-        unselected_values = torch.cat(unselected_values_list, dim=0).unsqueeze(0)
+        selected_keys = past_key_value.retained_key_cache[self.layer_idx]
+        selected_values = past_key_value.retained_value_cache[self.layer_idx]
+        unselected_keys = past_key_value.key_unit_cache[self.layer_idx]
+        unselected_values = past_key_value.value_unit_cache[self.layer_idx]
 
 
         attn_weights = torch.matmul(query_states, unselected_keys.transpose(2, 3)) / math.sqrt(self.head_dim)
