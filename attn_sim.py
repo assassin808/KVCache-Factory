@@ -53,6 +53,7 @@ for i in range(num_layers):
 l1, l2 = 7,11
 token_sims = []
 attn_weight_sum_l1 = []
+attn_weight_sum_l2 = []
 for i in range(seq_len):
     row_i_l1 = layer_attentions[l1][i, :].flatten()
     row_i_l2 = layer_attentions[l2][i, :].flatten()
@@ -73,7 +74,7 @@ attn_weight_sum_l2_matrix = attn_weight_sum_l2_matrix.cpu().numpy()
 attn_weight_sum_l1_matrix = attn_weight_sum_l1_matrix.cpu().numpy()
 
 # Create combined plot
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, figsize=(20, 5))
 
 # Layer similarity heatmap
 im1 = ax1.imshow(layer_sim_matrix, cmap='viridis', vmin=0, vmax=1)
@@ -91,6 +92,20 @@ ax2.set_xlabel('Token Position', fontsize=12)
 ax2.set_yticks([])
 ax2.set_xticks(range(0, seq_len, max(1, seq_len//10)))
 fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+
+# Attention weight sum heatmap
+im3 = ax3.imshow(attn_weight_sum_l1_matrix, cmap='viridis', aspect='auto')
+ax3.set_title(f'Attention Weight Sum (Layer {l1})', fontsize=14)
+ax3.set_xlabel('Token Position', fontsize=12)
+ax3.set_yticks([])
+ax3.set_xticks(range(0, seq_len, max(1, seq_len//10)))
+
+im4 = ax4.imshow(attn_weight_sum_l2_matrix, cmap='viridis', aspect='auto')
+ax4.set_title(f'Attention Weight Sum (Layer {l2})', fontsize=14)
+ax4.set_xlabel('Token Position', fontsize=12)
+ax4.set_yticks([])
+ax4.set_xticks(range(0, seq_len, max(1, seq_len//10)))
+
 
 plt.tight_layout()
 plt.savefig('combined_similarity_heatmap.jpg', dpi=300, bbox_inches='tight')
