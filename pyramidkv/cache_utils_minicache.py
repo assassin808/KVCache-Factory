@@ -459,7 +459,7 @@ class DynamicCache(Cache):
                         attn_weights = segment + causal_mask
                     
                     attn_weights_sum = attn_weights[:, :, -sink_size:, sink_size:-window_size ].sum(dim = -2)
-                    diff = abs((attn_weights_sum_prev-attn_weights_sum)/attn_weights_sum_prev)
+                    diff = abs((attn_weights_sum_prev-attn_weights_sum))
                     if attn_diff[i] == None:
                         attn_diff[i] = diff
                     else:
