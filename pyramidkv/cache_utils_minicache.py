@@ -12,6 +12,10 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import is_hqq_available, is_quanto_available, is_torchdynamo_compiling, logging
 
 
+import math
+import torch.nn.functional as F
+
+
 if is_quanto_available():
     quanto_version = version.parse(importlib.metadata.version("quanto"))
     if quanto_version >= version.parse("0.2.0"):
@@ -305,12 +309,124 @@ class DynamicCache(Cache):
         sink_size = 8
         window_size = 8
 
+        self.key_unit_cache.append(None)
+        self.value_unit_cache.append(None)
+        self.key_magnitude.append(None)
+        self.value_magnitude.append(None)
+        self.mask_k.append(None)
+        self.mask_v.append(None)
+        if False:
+            self.indices.append(None)
+            ret_value = (self.retained_key_cache[layer_idx].clone(), self.retained_value_cache[layer_idx].clone(), self.hidden_states[layer_idx])
+            if layer_idx == 31:
+                with open('layer_map.csv', 'r') as f:
+                        first_line = f.readline()
+                        num = int(first_line)
+                        for line in f:
+                            isfirst = False
+                            layer_map.append([i for i in line.strip().split(',')])
+                            for i in range(5):
+                                layer_map[-1][i] = int(layer_map[-1][i])
+                            layer_map[-1][5] = float(layer_map[-1][5])
+                            layer_map[-1][6] = float(layer_map[-1][6])
+                layer_map.sort(key=lambda x:-x[-2])#from high to low
+                used_segment = set()
+                replaced_segment = set()
+                print(len(layer_map))
+                for item in layer_map:
+                    i, j, seg,hi,hj, _, s = item
+                    if len(replaced_segment)>= 23 * 32:
+                        print(len(used_segment),len(replaced_segment))
+                        break
+                    if (j,seg,hj) in used_segment or (j,seg,hj) in replaced_segment or (i,seg,hi) in replaced_segment:
+                        continue
+                    # if j <= 2:
+                    #     continue
+                    # print('sim',i,j,hi,hj,_,s)
+                    self.layer_map.append(item)
+                    print(len(self.layer_map),item)
+                    used_segment.add((i,seg,hi))
+                    replaced_segment.add((j,seg,hj))
+            if layer_idx == 31:
+                with open('layer_map_final.csv', 'w') as f:
+                    for item in self.layer_map:
+                        f.write(','.join([str(i) for i in item]) + '\n')
+                exit(0)
+            return ret_value[0], ret_value[1], ret_value[2]
+            if layer_idx == 31:
+                for i in range(32):
+                    print(i)
+                    prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:].mean(dim=-2,keepdim=True), self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                    p = prev_segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
+                    p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D
+                    for j in range(32):
+                        if i >= j:
+                            continue
+
+                        # Get query-key pairs for both layers 
+                        segment = torch.matmul(self.query_cache[j][:,:,-window_size:,:].mean(dim=-2,keepdim=True), self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                        s = segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
+                        s_expanded = s.unsqueeze(0)  # [H_i, 1, S, D
+ 
+                        cosine_sim = F.cosine_similarity(p_expanded, s_expanded, dim=-1)
+                        cosine_sim_avg = cosine_sim.mean(dim=-1)  # [H_i, H_j]
+                        # Find best matches for each head in layer i
+
+                        for head_i in range(cosine_sim_avg.size(0)):
+                            for head_j in range(cosine_sim_avg.size(1)):
+                                sim = cosine_sim_avg[head_i][head_j].item()
+
+
+                                # Calculate norm scaling for matched heads
+                                p_head = p[head_i]
+                                s_head = s[head_j]
+                                p_norm = p_head.norm(dim=-1).mean().item()
+                                s_norm = s_head.norm(dim=-1).mean().item()
+                                scaling = s_norm / p_norm if p_norm != 0 else 0.0
+
+                                # Store matched pair information
+                                # if sim < 0.9:
+                                #     continue
+                                self.layer_map.append((i, j, 0, head_i, head_j, sim, scaling))
+
+                        # Cleanup
+                        del s,  s_expanded
+                    del p, p_expanded
+                # with open('layer_map.csv', 'r') as f:
+                #     print('read')
+                #     layer_map = []
+                #     first_line = f.readline()
+                #     num = int(first_line)
+                #     for line in f:
+                #         isfirst = False
+                #         layer_map.append([i for i in line.strip().split(',')])
+                #         for i in range(5):
+                #             layer_map[-1][i] = int(layer_map[-1][i])
+                #         layer_map[-1][5] = float(layer_map[-1][5])
+                #         layer_map[-1][6] = float(layer_map[-1][6])
+                
+                # with open('layer_map.csv', 'w') as f:
+                #     print('write')
+                #     f.write(str(num+1) + '\n')
+                #     if len(layer_map)!=0:
+                #         for item, prev in zip(self.layer_map,layer_map):
+                #             temp = [str(i) for i in item]
+                #             temp[-1] = str((float(temp[-1]) + prev[-1]*num)/(num+1))
+                #             temp[-2] = str((float(temp[-2]) + prev[-2]*num)/(num+1))
+                #             f.write(','.join(temp) + '\n')
+                #     else:
+                #         for item in self.layer_map:
+                #             f.write(','.join([str(i) for i in item]) + '\n')
+
+
+            return ret_value[0], ret_value[1], ret_value[2]
+            
         if layer_idx == 31:
             num_segments = 1
             segment_size = self.retained_key_cache[0].shape[2] // num_segments
             attn_lis = []
             attn_diff = {}
-            with open('layer_map.csv', 'r') as f:
+            with open('layer_map_final.csv', 'r') as f:
                 layer_map = []
                 for line in f:
                     layer_map.append([i for i in line.strip().split(',')])
@@ -318,14 +434,12 @@ class DynamicCache(Cache):
                         layer_map[-1][i] = int(layer_map[-1][i])
                     layer_map[-1][5] = float(layer_map[-1][5])
                     layer_map[-1][6] = float(layer_map[-1][6])
-            import math
-            import torch.nn.functional as F
-
+           
             for i in range(32):
                 attn_diff[i] = None
-                prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                p = prev_segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
-                p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D]
+                prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:].mean(dim=-2,keepdim=True), self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                # p = prev_segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
+                # p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D]
                 if attention_mask is not None:  # no matter the length, we just slice it
                         causal_mask = attention_mask[:, :, :, :  self.retained_key_cache[i].shape[-2]]
                         attn_weights = prev_segment + causal_mask
@@ -337,8 +451,8 @@ class DynamicCache(Cache):
                     #     continue
 
                     # Get query-key pairs for both layers 
-                    segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                    s = segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
+                    segment = torch.matmul(self.query_cache[j][:,:,-window_size:,:].mean(dim=-2,keepdim=True), self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                    # s = segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
 
                     if attention_mask is not None:  # no matter the length, we just slice it
                         causal_mask = attention_mask[:, :, :, :  self.retained_key_cache[i].shape[-2]]
@@ -404,14 +518,6 @@ class DynamicCache(Cache):
 
 
         layer_map.sort(key=lambda x:-x[-2])#from high to low
-
-        self.key_unit_cache.append(None)
-        self.value_unit_cache.append(None)
-        self.key_magnitude.append(None)
-        self.value_magnitude.append(None)
-        self.mask_k.append(None)
-        self.mask_v.append(None)
-
 
         ret_value = (self.retained_key_cache[layer_idx].clone(), self.retained_value_cache[layer_idx].clone(), self.hidden_states[layer_idx])
 
