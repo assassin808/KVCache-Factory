@@ -550,20 +550,19 @@ def llama_attn_forward_MiniCache(
             key_states, value_states = past_key_value.update_miniCache_decode(key_states, value_states, self.layer_idx, self.config.num_hidden_layers, cache_kwargs)
             past_key_value.decode_q.append(query_states.clone())
             # print(past_key_value.decode_q)
-            if False:
-                for item in past_key_value.layer_map:
-                    # print(item, len(past_key_value.decode_q)-1)
-                    if len(past_key_value.decode_q)-1 == item[1]:
-                        # print(query_states.shape)
-                        # print(past_key_value.decode_q[item[0]][:,item[3],:,:].sum().isnan())
-                        query_states[:,item[4],:,:] = past_key_value.decode_q[item[0]][:,item[3],:,:] * item[6]
-                        # print(item[-1])
+            for item in past_key_value.layer_map:
+                # print(item, len(past_key_value.decode_q)-1)
+                if len(past_key_value.decode_q)-1 == item[1]:
+                    # print(query_states.shape)
+                    # print(past_key_value.decode_q[item[0]][:,item[3],:,:].sum().isnan())
+                    query_states[:,item[4],:,:] = past_key_value.decode_q[item[0]][:,item[3],:,:] * item[6]
+                    # print(item[-1])
             if len(past_key_value.decode_q) == 32:
                 past_key_value.decode_q.clear()
         past_key_value._seen_tokens=self.kv_seq_len
 
     # print(key_states.shape[-2],self.prefill_len)
-    if past_key_value is not None and key_states.shape[-2] != self.prefill_len and False:
+    if past_key_value is not None and key_states.shape[-2] != self.prefill_len:
         # print(self.prefill_len-8)
 
         # upcast attention to fp32

@@ -440,11 +440,11 @@ class DynamicCache(Cache):
                 prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:].mean(dim=-2,keepdim=True), self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
                 # p = prev_segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
                 # p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D]
-                if attention_mask is not None:  # no matter the length, we just slice it
-                        causal_mask = attention_mask[:, :, :, :  self.retained_key_cache[i].shape[-2]]
-                        attn_weights = prev_segment + causal_mask
-                    
-                attn_weights_sum_prev = attn_weights[:, :, -sink_size:, sink_size:-window_size ].sum(dim = -2)
+                # if attention_mask is not None:  # no matter the length, we just slice it
+                #         causal_mask = attention_mask[:, :, :, :  self.retained_key_cache[i].shape[-2]]
+                #         attn_weights = prev_segment + causal_mask
+                attn_weights = prev_segment
+                attn_weights_sum_prev = attn_weights[:, :, :, sink_size:-window_size ].sum(dim = -2)
                 all_indices = attn_weights_sum_prev.topk(256-window_size-sink_size, dim=-1).indices #[1,h,10]
                 for j in range(32):
                     # if i >= j:
@@ -453,12 +453,11 @@ class DynamicCache(Cache):
                     # Get query-key pairs for both layers 
                     segment = torch.matmul(self.query_cache[j][:,:,-window_size:,:].mean(dim=-2,keepdim=True), self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
                     # s = segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
-
-                    if attention_mask is not None:  # no matter the length, we just slice it
-                        causal_mask = attention_mask[:, :, :, :  self.retained_key_cache[i].shape[-2]]
-                        attn_weights = segment + causal_mask
-                    
-                    attn_weights_sum = attn_weights[:, :, -sink_size:, sink_size:-window_size ].sum(dim = -2)
+                    # if attention_mask is not None:  # no matter the length, we just slice it
+                    #     causal_mask = attention_mask[:, :, :, :  self.retained_key_cache[i].shape[-2]]
+                    #     attn_weights = segment + causal_mask
+                    attn_weights = segment
+                    attn_weights_sum = attn_weights[:, :, :, sink_size:-window_size ].sum(dim = -2)
                     diff = abs((attn_weights_sum_prev-attn_weights_sum))
                     if attn_diff[i] == None:
                         attn_diff[i] = diff
