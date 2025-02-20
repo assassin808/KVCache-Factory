@@ -307,7 +307,7 @@ class DynamicCache(Cache):
 
         layer_map = []
         sink_size = 8
-        window_size = 8
+        window_size = 64
 
         self.key_unit_cache.append(None)
         self.value_unit_cache.append(None)
@@ -444,11 +444,11 @@ class DynamicCache(Cache):
                 #         causal_mask = attention_mask[:, :, :, :  self.retained_key_cache[i].shape[-2]]
                 #         attn_weights = prev_segment + causal_mask
                 attn_weights = prev_segment
-                attn_weights_sum_prev = attn_weights[:, :, :, sink_size:-window_size ].sum(dim = -2)
+                attn_weights_sum_prev = attn_weights[:, :, -window_size:, sink_size:-window_size*4 ].sum(dim = -2)
                 all_indices = attn_weights_sum_prev.topk(256-window_size-sink_size, dim=-1).indices #[1,h,10]
                 for j in range(32):
-                    # if i >= j:
-                    #     continue
+                    if abs(i-j)>16:
+                        continue
 
                     # Get query-key pairs for both layers 
                     segment = torch.matmul(self.query_cache[j][:,:,-window_size:,:].mean(dim=-2,keepdim=True), self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
@@ -457,7 +457,7 @@ class DynamicCache(Cache):
                     #     causal_mask = attention_mask[:, :, :, :  self.retained_key_cache[i].shape[-2]]
                     #     attn_weights = segment + causal_mask
                     attn_weights = segment
-                    attn_weights_sum = attn_weights[:, :, :, sink_size:-window_size ].sum(dim = -2)
+                    attn_weights_sum = attn_weights[:, :, -window_size:, sink_size:-window_size*4 ].sum(dim = -2)
                     diff = abs((attn_weights_sum_prev-attn_weights_sum))
                     if attn_diff[i] == None:
                         attn_diff[i] = diff
@@ -498,7 +498,7 @@ class DynamicCache(Cache):
                 #     del s,  s_expanded
                 # del p, p_expanded
                 selected_attn_diff =torch.gather(attn_diff[i], dim=-1, index=all_indices)
-                indices = selected_attn_diff.topk((256-window_size-sink_size)//2, dim=-1).indices
+                indices = selected_attn_diff.topk((256-window_size-sink_size)*0+1, dim=-1).indices
                 indices = torch.gather(all_indices, dim=-1, index=indices)
 
                 final_indices_expanded = indices.unsqueeze(-1)  # Shape: [batch, heads, k_final, 1]
@@ -529,7 +529,7 @@ class DynamicCache(Cache):
             sink_indices = torch.arange(0, sink_size, device=self.retained_key_cache[0].device)
             window_indices = torch.arange(self.retained_key_cache[0].shape[-2] - window_size, self.retained_key_cache[0].shape[-2], device=self.retained_key_cache[0].device)
             combined_indices = torch.cat([sink_indices, window_indices])
-            i_list, j_list, hi_list, hj_list, lis_list = [], [], [], [], []
+            i_list, j_list, hi_list, hj_list, lis_list, _lis_list = [], [], [], [], [], []
             for item in layer_map:
                 i, j, seg, hi, hj, _, s = item
                 self.layer_map.append(item)
@@ -538,6 +538,7 @@ class DynamicCache(Cache):
                 hi_list.append(hi)
                 hj_list.append(hj)
                 lis_list.append(self.indices[j][1][0][hj])
+                _lis_list.append(self.indices[j][0][0][hj])
 
             # Convert lists to tensors
             i_tensor = torch.tensor(i_list, device=self.retained_key_cache[0].device)
@@ -545,10 +546,27 @@ class DynamicCache(Cache):
             hi_tensor = torch.tensor(hi_list, device=self.retained_key_cache[0].device)
             hj_tensor = torch.tensor(hj_list, device=self.retained_key_cache[0].device)
             lis_tensor = torch.stack(lis_list)  # Shape: [num_items, M]
+            _lis_tensor = torch.stack(_lis_list)  # Shape: [num_items, M]
 
             # Perform batched updates
-            for idx, (i, j, hi, hj, lis) in enumerate(zip(i_tensor, j_tensor, hi_tensor, hj_tensor, lis_tensor)):
-                self.retained_key_cache[j][:, hj, :, :] = self.retained_key_cache[i][:, hi, :, :]
+            # Inside the batched updates loop where layer_map is processed
+            for idx, (i, j, hi, hj, lis, _lis) in enumerate(zip(i_tensor, j_tensor, hi_tensor, hj_tensor, lis_tensor, _lis_tensor)):
+                # Extract original heads from temporary clones
+                p_head = temp_key[i][:, hi, _lis, :]  # [1, seq_len, dim]
+                s_head = temp_key[j][:, hj, _lis, :]
+                
+                # Calculate norms and scaling factor
+                p_norm = p_head.norm(dim=-1).mean().item()
+                s_norm = s_head.norm(dim=-1).mean().item()
+                scaling = s_norm / p_norm 
+                
+                # Apply scaling to the source key from layer i
+                scaled_key = temp_key[i][:, hi, :, :] * scaling
+                
+                # Update retained key cache with scaled values
+                self.retained_key_cache[j][:, hj, :, :] = scaled_key
+                
+                # Preserve specific indices from original head
                 update_indices = torch.cat([combined_indices, lis])
                 self.retained_key_cache[j][:, hj, update_indices, :] = temp_key[j][:, hj, update_indices, :]
                 # self.retained_value_cache[j][:, hj, 128:-128, :] = temp_value[i][:, hi, 128:-128, :]

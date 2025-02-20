@@ -555,7 +555,7 @@ def llama_attn_forward_MiniCache(
                 if len(past_key_value.decode_q)-1 == item[1]:
                     # print(query_states.shape)
                     # print(past_key_value.decode_q[item[0]][:,item[3],:,:].sum().isnan())
-                    query_states[:,item[4],:,:] = past_key_value.decode_q[item[0]][:,item[3],:,:] * item[6]
+                    query_states[:,item[4],:,:] = past_key_value.decode_q[item[0]][:,item[3],:,:]
                     # print(item[-1])
             if len(past_key_value.decode_q) == 32:
                 past_key_value.decode_q.clear()
