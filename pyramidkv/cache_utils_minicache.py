@@ -318,41 +318,18 @@ class DynamicCache(Cache):
         if False:
             self.indices.append(None)
             ret_value = (self.retained_key_cache[layer_idx].clone(), self.retained_value_cache[layer_idx].clone(), self.hidden_states[layer_idx])
-            if layer_idx == 31:
-                with open('layer_map.csv', 'r') as f:
-                        first_line = f.readline()
-                        num = int(first_line)
-                        for line in f:
-                            isfirst = False
-                            layer_map.append([i for i in line.strip().split(',')])
-                            for i in range(5):
-                                layer_map[-1][i] = int(layer_map[-1][i])
-                            layer_map[-1][5] = float(layer_map[-1][5])
-                            layer_map[-1][6] = float(layer_map[-1][6])
-                layer_map.sort(key=lambda x:-x[-2])#from high to low
-                used_segment = set()
-                replaced_segment = set()
-                print(len(layer_map))
-                for item in layer_map:
-                    i, j, seg,hi,hj, _, s = item
-                    if len(replaced_segment)>= 23 * 32:
-                        print(len(used_segment),len(replaced_segment))
-                        break
-                    if (j,seg,hj) in used_segment or (j,seg,hj) in replaced_segment or (i,seg,hi) in replaced_segment:
-                        continue
-                    # if j <= 2:
-                    #     continue
-                    # print('sim',i,j,hi,hj,_,s)
-                    self.layer_map.append(item)
-                    print(len(self.layer_map),item)
-                    used_segment.add((i,seg,hi))
-                    replaced_segment.add((j,seg,hj))
-            if layer_idx == 31:
-                with open('layer_map_final.csv', 'w') as f:
-                    for item in self.layer_map:
-                        f.write(','.join([str(i) for i in item]) + '\n')
-                exit(0)
-            return ret_value[0], ret_value[1], ret_value[2]
+            # if layer_idx == 31:
+            #     with open('layer_map_new.csv', 'r') as f:
+            #             first_line = f.readline()
+            #             num = int(first_line)
+            #             for line in f:
+            #                 isfirst = False
+            #                 layer_map.append([i for i in line.strip().split(',')])
+            #                 for i in range(5):
+            #                     layer_map[-1][i] = int(layer_map[-1][i])
+            #                 layer_map[-1][5] = float(layer_map[-1][5])
+            #                 layer_map[-1][6] = float(layer_map[-1][6])
+            layer_map = []
             if layer_idx == 31:
                 for i in range(32):
                     print(i)
@@ -385,13 +362,37 @@ class DynamicCache(Cache):
                                 scaling = s_norm / p_norm if p_norm != 0 else 0.0
 
                                 # Store matched pair information
-                                # if sim < 0.9:
-                                #     continue
-                                self.layer_map.append((i, j, 0, head_i, head_j, sim, scaling))
+                                if sim < 0.9:
+                                    continue
+                                layer_map.append((i, j, 0, head_i, head_j, sim, scaling))
 
                         # Cleanup
                         del s,  s_expanded
                     del p, p_expanded
+                layer_map.sort(key=lambda x:-x[-2])#from high to low
+                used_segment = set()
+                replaced_segment = set()
+                print(len(layer_map))
+                for item in layer_map:
+                    i, j, seg,hi,hj, _, s = item
+                    if len(replaced_segment)>= 23 * 32:
+                        print(len(used_segment),len(replaced_segment))
+                        break
+                    if (j,seg,hj) in used_segment or (j,seg,hj) in replaced_segment or (i,seg,hi) in replaced_segment:
+                        continue
+                    # if j <= 2:
+                    #     continue
+                    # print('sim',i,j,hi,hj,_,s)
+                    self.layer_map.append(item)
+                    print(len(self.layer_map),item)
+                    used_segment.add((i,seg,hi))
+                    replaced_segment.add((j,seg,hj))
+            if layer_idx == 31:
+                with open('layer_map_final.csv', 'w') as f:
+                    for item in self.layer_map:
+                        f.write(','.join([str(i) for i in item]) + '\n')
+                exit(0)
+            return ret_value[0], ret_value[1], ret_value[2]
                 # with open('layer_map.csv', 'r') as f:
                 #     print('read')
                 #     layer_map = []
