@@ -326,13 +326,12 @@ class SnapKVCluster():
 
             attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
             attn_weights_sum = attn_weights[:, :, -self.window_size:, : -self.window_size].sum(dim = -2)
-            # if self.pooling == 'avgpool':
-            #     attn_cache = F.avg_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
-            # elif self.pooling == 'maxpool':
-            #     attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
-            # else:
-            #     raise ValueError('Pooling method not supported')
-            attn_cache = attn_weights_sum
+            if self.pooling == 'avgpool':
+                attn_cache = F.avg_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+            elif self.pooling == 'maxpool':
+                attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+            else:
+                raise ValueError('Pooling method not supported')
             indices = attn_cache.topk(self.max_capacity_prompt - self.window_size, dim=-1).indices
             indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
 
