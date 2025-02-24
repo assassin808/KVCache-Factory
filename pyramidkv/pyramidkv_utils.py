@@ -292,6 +292,7 @@ class SnapKVCluster():
         self.merge = merge
         self.recent_size = recent_size
         self.ratio = ratio
+        print(pooling,kernel_size)
 
     def reset(self, window_size = 64, max_capacity_prompt = 256 + 64, kernel_size = 5, pooling = 'avgpool', merge = None):
         self.window_size = window_size
@@ -309,7 +310,7 @@ class SnapKVCluster():
         assert key_states.shape[-2] == query_states.shape[-2]
         bsz, num_heads, q_len, head_dim = query_states.shape
         
-        print(f"SnapKV max_capacity_prompt {self.max_capacity_prompt}, {self.window_size}")
+        # print(f"SnapKV max_capacity_prompt {self.max_capacity_prompt}, {self.window_size}")
         
         if q_len < self.max_capacity_prompt:
             return key_states, value_states
@@ -325,12 +326,13 @@ class SnapKVCluster():
 
             attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
             attn_weights_sum = attn_weights[:, :, -self.window_size:, : -self.window_size].sum(dim = -2)
-            if self.pooling == 'avgpool':
-                attn_cache = F.avg_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
-            elif self.pooling == 'maxpool':
-                attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
-            else:
-                raise ValueError('Pooling method not supported')
+            # if self.pooling == 'avgpool':
+            #     attn_cache = F.avg_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+            # elif self.pooling == 'maxpool':
+            #     attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+            # else:
+            #     raise ValueError('Pooling method not supported')
+            attn_cache = attn_weights_sum
             indices = attn_cache.topk(self.max_capacity_prompt - self.window_size, dim=-1).indices
             indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
 

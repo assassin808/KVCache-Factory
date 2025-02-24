@@ -14,6 +14,7 @@ from transformers.utils import is_hqq_available, is_quanto_available, is_torchdy
 
 import math
 import torch.nn.functional as F
+import torch.nn as nn
 
 
 if is_quanto_available():
@@ -307,7 +308,7 @@ class DynamicCache(Cache):
 
         layer_map = []
         sink_size = 8
-        window_size = 64
+        window_size = 64 // 4 // 2
 
         self.key_unit_cache.append(None)
         self.value_unit_cache.append(None)
@@ -333,7 +334,7 @@ class DynamicCache(Cache):
             if layer_idx == 31:
                 for i in range(32):
                     print(i)
-                    prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:].mean(dim=-2,keepdim=True), self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                    prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
                     p = prev_segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
                     p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D
                     for j in range(32):
@@ -341,7 +342,7 @@ class DynamicCache(Cache):
                             continue
 
                         # Get query-key pairs for both layers 
-                        segment = torch.matmul(self.query_cache[j][:,:,-window_size:,:].mean(dim=-2,keepdim=True), self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                        segment = torch.matmul(self.query_cache[j][:,:,-window_size:,:], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
                         s = segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
                         s_expanded = s.unsqueeze(0)  # [H_i, 1, S, D
  
@@ -438,28 +439,32 @@ class DynamicCache(Cache):
            
             for i in range(32):
                 attn_diff[i] = None
-                prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:].mean(dim=-2,keepdim=True), self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                
+                prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
                 # p = prev_segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
                 # p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D]
-                # if attention_mask is not None:  # no matter the length, we just slice it
-                #         causal_mask = attention_mask[:, :, :, :  self.retained_key_cache[i].shape[-2]]
-                #         attn_weights = prev_segment + causal_mask
-                attn_weights = prev_segment
-                attn_weights_sum_prev = attn_weights[:, :, -window_size:, sink_size:-window_size*4 ].sum(dim = -2)
-                all_indices = attn_weights_sum_prev.topk(256-window_size-sink_size, dim=-1).indices #[1,h,10]
+                if attention_mask is not None:  # no matter the length, we just slice it
+                        causal_mask = attention_mask[:, :, -window_size:, :  self.retained_key_cache[i].shape[-2]]
+                        attn_weights = prev_segment + causal_mask
+                # attn_weights = prev_segment
+                attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(self.retained_key_cache[i].dtype)
+                attn_weights_sum_prev = attn_weights[:, :, -window_size:, sink_size:-window_size ].sum(dim = -2)
+                all_indices = (F.max_pool1d(attn_weights_sum_prev, kernel_size = 7, padding=7//2, stride=1)).topk(256-window_size-sink_size, dim=-1).indices #[1,h,10]
                 for j in range(32):
-                    if abs(i-j)>16:
+                    if abs(i-j)>5:
                         continue
 
                     # Get query-key pairs for both layers 
-                    segment = torch.matmul(self.query_cache[j][:,:,-window_size:,:].mean(dim=-2,keepdim=True), self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                    segment = torch.matmul(self.query_cache[j][:,:,-window_size:,:], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
                     # s = segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
-                    # if attention_mask is not None:  # no matter the length, we just slice it
-                    #     causal_mask = attention_mask[:, :, :, :  self.retained_key_cache[i].shape[-2]]
-                    #     attn_weights = segment + causal_mask
-                    attn_weights = segment
-                    attn_weights_sum = attn_weights[:, :, -window_size:, sink_size:-window_size*4 ].sum(dim = -2)
+                    if attention_mask is not None:  # no matter the length, we just slice it
+                        causal_mask = attention_mask[:, :, -window_size:, :  self.retained_key_cache[i].shape[-2]]
+                        attn_weights = segment + causal_mask 
+                    # attn_weights = segment
+                    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(self.retained_key_cache[j].dtype)
+                    attn_weights_sum = attn_weights[:, :, -window_size:, sink_size:-window_size ].sum(dim = -2)
                     diff = abs((attn_weights_sum_prev-attn_weights_sum))
+                    # diff = F.max_pool1d(diff, kernel_size = 7, padding=7//2, stride=1)
                     if attn_diff[i] == None:
                         attn_diff[i] = diff
                     else:
@@ -498,8 +503,9 @@ class DynamicCache(Cache):
                     # # Cleanup
                 #     del s,  s_expanded
                 # del p, p_expanded
+                attn_diff[i] = F.max_pool1d(attn_diff[i], kernel_size = 7, padding=7//2, stride=1)
                 selected_attn_diff =torch.gather(attn_diff[i], dim=-1, index=all_indices)
-                indices = selected_attn_diff.topk((256-window_size-sink_size)*0+1, dim=-1).indices
+                indices = selected_attn_diff.topk((256-window_size-sink_size)*0 + 64, dim=-1).indices
                 indices = torch.gather(all_indices, dim=-1, index=indices)
 
                 final_indices_expanded = indices.unsqueeze(-1)  # Shape: [batch, heads, k_final, 1]
@@ -610,8 +616,10 @@ class DynamicCache(Cache):
             # Update caches in-place
             for j in range(32):
                 self.key_unit_cache[j] = unselected_keys[j]
+                # print(unselected_keys[j].shape)
                 self.value_unit_cache[j] = unselected_values[j]
                 self.retained_key_cache[j] = selected_keys[j]
+                # print(selected_keys[j].shape)
                 self.retained_value_cache[j] = selected_values[j]
 
         # if layer_idx == 31:
