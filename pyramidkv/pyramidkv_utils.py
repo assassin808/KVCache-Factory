@@ -292,7 +292,7 @@ class SnapKVCluster():
         self.merge = merge
         self.recent_size = recent_size
         self.ratio = ratio
-        print(pooling,kernel_size)
+        # print(pooling,kernel_size)
 
     def reset(self, window_size = 64, max_capacity_prompt = 256 + 64, kernel_size = 5, pooling = 'avgpool', merge = None):
         self.window_size = window_size
@@ -310,7 +310,7 @@ class SnapKVCluster():
         assert key_states.shape[-2] == query_states.shape[-2]
         bsz, num_heads, q_len, head_dim = query_states.shape
         
-        # print(f"SnapKV max_capacity_prompt {self.max_capacity_prompt}, {self.window_size}")
+        print(f"SnapKV max_capacity_prompt {self.max_capacity_prompt}, {self.window_size}")
         
         if q_len < self.max_capacity_prompt:
             return key_states, value_states
