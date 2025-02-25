@@ -240,7 +240,7 @@ class DynamicCache(Cache):
       self.hidden_states = []
       self.query_cache = []
       self.decode_q = []
-      self.layer_map = []
+      self.layer_map = {}
       self.indices = []
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
@@ -384,14 +384,22 @@ class DynamicCache(Cache):
                     # if j <= 2:
                     #     continue
                     # print('sim',i,j,hi,hj,_,s)
-                    self.layer_map.append(item)
-                    print(len(self.layer_map),item)
+                    self.layer_map[(item[1],item[4])] = (item[0],item[2],item[3],item[5],item[6])
+                    # print(len(self.layer_map),item)
                     used_segment.add((i,seg,hi))
                     replaced_segment.add((j,seg,hj))
             if layer_idx == 31:
                 with open('layer_map_final.csv', 'w') as f:
-                    for item in self.layer_map:
-                        f.write(','.join([str(i) for i in item]) + '\n')
+                    for key in self.layer_map.keys():
+                        f.write(','.join([str(i) for i in [
+                            self.layer_map[key][0],
+                            key[0],
+                            self.layer_map[key][1],
+                            self.layer_map[key][2],
+                            key[1],
+                            self.layer_map[key][3],
+                            self.layer_map[key][4]
+                        ]]) + '\n')
                 exit(0)
             return ret_value[0], ret_value[1], ret_value[2]
                 # with open('layer_map.csv', 'r') as f:
@@ -436,6 +444,8 @@ class DynamicCache(Cache):
                         layer_map[-1][i] = int(layer_map[-1][i])
                     layer_map[-1][5] = float(layer_map[-1][5])
                     layer_map[-1][6] = float(layer_map[-1][6])
+                    item = layer_map[-1]
+                    self.layer_map[(item[1],item[4])] = (item[0],item[2],item[3],item[5],item[6])
            
             for i in range(32):
                 attn_diff[i] = None
@@ -449,7 +459,7 @@ class DynamicCache(Cache):
                 # attn_weights = prev_segment
                 attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(self.retained_key_cache[i].dtype)
                 attn_weights_sum_prev = attn_weights[:, :, -window_size:, sink_size:-window_size ].sum(dim = -2)
-                all_indices = (F.max_pool1d(attn_weights_sum_prev, kernel_size = 7, padding=7//2, stride=1)).topk((512-window_size-sink_size), dim=-1).indices #[1,h,10]
+                all_indices = (F.max_pool1d(attn_weights_sum_prev, kernel_size = 7, padding=7//2, stride=1)).topk((624-window_size-sink_size), dim=-1).indices #[1,h,10]
                 for j in range(32):
                     if abs(i-j)>5:
                         continue
@@ -470,42 +480,10 @@ class DynamicCache(Cache):
                     else:
                         attn_diff[i] += diff
 
-                    # Calculate cross-head similarity matrix
-                    # s_expanded = s.unsqueeze(0)  # [1, H_j, S, D]
-                    
-                    # # Compute cosine similarity and average over sequence
-                    # # import random
-                    # # for head_i in range(32):
-                    # #     for head_j in range(32):
-                    # #         layer_map.append((i, j, 0, head_i, head_j, random.random(), 1))
-                    # # del segment
-                    # cosine_sim = F.cosine_similarity(p_expanded, s_expanded, dim=-1)
-                    # cosine_sim_avg = cosine_sim.mean(dim=-1)  # [H_i, H_j]
-                    # # Find best matches for each head in layer i
-
-                    # for head_i in range(cosine_sim_avg.size(0)):
-                    #     for head_j in range(cosine_sim_avg.size(1)):
-                    #         sim = cosine_sim_avg[head_i][head_j].item()
-
-
-                    #         # Calculate norm scaling for matched heads
-                    #         p_head = p[head_i]
-                    #         s_head = s[head_j]
-                    #         p_norm = p_head.norm(dim=-1).mean().item()
-                    #         s_norm = s_head.norm(dim=-1).mean().item()
-                    #         scaling = s_norm / p_norm if p_norm != 0 else 0.0
-
-                    #         # Store matched pair information
-                    #         # if sim < 0.9:
-                    #         #     continue
-                    #         layer_map.append((i, j, 0, head_i, head_j, sim, scaling))
-
-                    # # Cleanup
-                #     del s,  s_expanded
-                # del p, p_expanded
+                  
                 attn_diff[i] = F.max_pool1d(attn_diff[i], kernel_size = 7, padding=7//2, stride=1)
                 selected_attn_diff =torch.gather(attn_diff[i], dim=-1, index=all_indices)
-                indices = selected_attn_diff.topk((int(624*0.5) - window_size - sink_size)*0+64, dim=-1).indices
+                indices = selected_attn_diff.topk((int(624*0.5) - window_size - sink_size), dim=-1).indices
                 indices = torch.gather(all_indices, dim=-1, index=indices)
 
                 final_indices_expanded = indices.unsqueeze(-1)  # Shape: [batch, heads, k_final, 1]
@@ -545,7 +523,7 @@ class DynamicCache(Cache):
                 hi_list.append(hi)
                 hj_list.append(hj)
                 lis_list.append(self.indices[j][1][0][hj])
-                _lis_list.append(self.indices[j][0][0][hj])
+                _lis_list.append(self.indices[i][0][0][hi])
 
             # Convert lists to tensors
             i_tensor = torch.tensor(i_list, device=self.retained_key_cache[0].device)
