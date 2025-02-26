@@ -391,7 +391,7 @@ class SnapKVCluster():
             return kv_pruned, kv_recent, mask, value_states
 
 class GroupHeadKVCluster():
-    def __init__(self, window_size = 64, max_capacity_prompt = 256 + 64, kernel_size = 5, pooling = 'avgpool', merge = None, recent_size = 32, ratio =  0.4):
+    def __init__(self, window_size = 64, max_capacity_prompt = 256 + 64, kernel_size = 5, pooling = 'avgpool', merge = None, recent_size = 32, ratio =  0.4, sink_size = 4):
         self.window_size = window_size
         self.max_capacity_prompt = max_capacity_prompt
         assert self.max_capacity_prompt - self.window_size > 0
@@ -400,8 +400,9 @@ class GroupHeadKVCluster():
         self.merge = merge
         self.recent_size = recent_size
         self.ratio = ratio
+        self.sink_size = sink_size
 
-    def reset(self, window_size = 64, max_capacity_prompt = 256 + 64, kernel_size = 5, pooling = 'avgpool', merge = None, recent_size = 32, ratio =  0.4):
+    def reset(self, window_size = 64, max_capacity_prompt = 256 + 64, kernel_size = 5, pooling = 'avgpool', merge = None, recent_size = 32, ratio =  0.4, sink_size = 4):
         self.window_size = window_size
         self.max_capacity_prompt = max_capacity_prompt
         assert self.max_capacity_prompt - self.window_size > 0
@@ -410,41 +411,39 @@ class GroupHeadKVCluster():
         self.merge = merge
         self.ratio = ratio
         self.recent_size = recent_size
+        self.sink_size = sink_size
 
-    def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups):
+    def update_kv(self, key_states, query_states, value_states, attention_mask, layer_map):
         
         # check if prefix phase
         assert key_states.shape[-2] == query_states.shape[-2]
         bsz, num_heads, q_len, head_dim = query_states.shape
         
-        print(f"SnapKV max_capacity_prompt {self.max_capacity_prompt}")
+        print(f"GroupHead max_capacity_prompt {self.max_capacity_prompt}")
         
         if q_len < self.max_capacity_prompt:
             return key_states, value_states
         else:
-            attn_weights = torch.matmul(query_states[..., -self.window_size:, :], key_states.transpose(2, 3)) / math.sqrt(head_dim)
-            mask = torch.full((self.window_size, self.window_size), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
-            mask_cond = torch.arange(mask.size(-1), device=attn_weights.device)
-            mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
-            mask = mask.to(attn_weights.device)
-            attention_mask = mask[None, None, :, :]
+            anchors = set(layer_map.values())
 
-            attn_weights[:, :, -self.window_size:, -self.window_size:] += attention_mask
+            attn_seg = torch.matmul(query_states[:,:,-self.window_size:,:],key_states.transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
 
-            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-            attn_weights_sum = attn_weights[:, :, -self.window_size:, : -self.window_size].sum(dim = -2)
+            if attention_mask is not None:  # no matter the length, we just slice it
+                causal_mask = attention_mask[:, :, -self.window_size:, :  key_states.shape[-2]]
+                attn_weights = attn_seg + causal_mask
+
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(key_states.dtype)
+            attn_weights_sum = attn_weights[:, :, -self.window_size:, self.sink_size:-self.window_size ].sum(dim = -2)
+
             if self.pooling == 'avgpool':
-                attn_cache = F.avg_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+                blocked_attn_weights_sum = F.avg_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
             elif self.pooling == 'maxpool':
-                attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+                blocked_attn_weights_sum = F.max_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
             else:
                 raise ValueError('Pooling method not supported')
-            indices = attn_cache.topk(self.max_capacity_prompt - self.window_size, dim=-1).indices
-            indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
 
-            if self.merge is not None:
-                key_states, value_states = merge_kv(key_states, value_states, indices, self.window_size, self.merge)
-                return key_states, value_states
+            indices = blocked_attn_weights_sum.topk(self.max_capacity_prompt * ratio - self.window_size - self.sink_size, dim=-1).indices + self.sink_size
+
 
             k_past_compress = key_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)
             v_past_compress = value_states[:, :, :-self.window_size, :].gather(dim = 2, index = indices)
