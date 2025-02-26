@@ -219,7 +219,7 @@ def main(args):
         if args.method != "FullKV":
             if args.method.lower() in ["snapkv","pyramidkv","h2o","cam", "l2norm", "adakv", "headkv", "think"]:
                 window_sizes = 8
-            elif args.method.lower() in ["streamingllm"]:
+            elif args.method.lower() in ["streamingllm", 'grouphead']:
                 window_sizes = max_capacity_prompts - 4
 
             if args.method.lower() =='headkv':
@@ -232,6 +232,23 @@ def main(args):
                 min_num = (args.max_capacity_prompts - args.max_capacity_prompts // args.head_beta)
                 head_capacity = torch.round(total_attention * total_pool_capacity + min_num).int()
                 model.model.config.head_capacity = head_capacity    
+
+            if args.method.lower() =='grouphead':
+                # add new attribute to model, which is called layermap, and is loaded from csv file, path given by args.map_path.
+                # Here is an example of how to add it to model.config
+                model.model.config.layermap = {}
+                with open(args.head_path, 'r') as file:
+                    head_list = json.loads(file.readline())
+                with open(args.head_path, 'r') as f:
+                    layer_map = []
+                    for line in f:
+                        layer_map.append([i for i in line.strip().split(',')])
+                        for i in range(4):
+                            layer_map[-1][i] = int(layer_map[-1][i])
+                        item = layer_map[-1]
+                        model.model.config.layermap[(item[1],item[4])] = (item[0],item[2])
+                # to use this config in attn_forward, here is how to use it
+                # layer_map = self.config.layermap
 
             kernel_sizes = 7
             pooling = "maxpool"
