@@ -449,7 +449,7 @@ class DynamicCache(Cache):
                 # attn_weights = prev_segment
                 attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(self.retained_key_cache[i].dtype)
                 attn_weights_sum_prev = attn_weights[:, :, -window_size:, sink_size:-window_size ].sum(dim = -2)
-                all_indices = (F.max_pool1d(attn_weights_sum_prev, kernel_size = 7, padding=7//2, stride=1)).topk(312-window_size-sink_size, dim=-1).indices #[1,h,10]
+                all_indices = (F.max_pool1d(attn_weights_sum_prev, kernel_size = 7, padding=7//2, stride=1)).topk((512-window_size-sink_size), dim=-1).indices #[1,h,10]
                 for j in range(32):
                     if abs(i-j)>5:
                         continue
@@ -505,7 +505,7 @@ class DynamicCache(Cache):
                 # del p, p_expanded
                 attn_diff[i] = F.max_pool1d(attn_diff[i], kernel_size = 7, padding=7//2, stride=1)
                 selected_attn_diff =torch.gather(attn_diff[i], dim=-1, index=all_indices)
-                indices = selected_attn_diff.topk(int(312*0.5) - window_size - sink_size, dim=-1).indices
+                indices = selected_attn_diff.topk((int(624*0.5) - window_size - sink_size)*0+64, dim=-1).indices
                 indices = torch.gather(all_indices, dim=-1, index=indices)
 
                 final_indices_expanded = indices.unsqueeze(-1)  # Shape: [batch, heads, k_final, 1]

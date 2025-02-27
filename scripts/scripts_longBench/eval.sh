@@ -1,6 +1,10 @@
 # export CUDA_VISIBLE_DEVICES=$1
 
+<<<<<<< HEAD
 method="SnapKV" # Support PyramidKV, SnapKV, H2O, StreamingLLM, CAM, L2Norm, ThinK
+=======
+method="minicache" # Support PyramidKV, SnapKV, H2O, StreamingLLM, CAM, L2Norm, ThinK
+>>>>>>> 8896ab1bccbd78e09fddc62229142224090ef3d3
 max_capacity_prompts=512 # 128,2048 in paper
 attn_implementation="eager" # Support "flash_attention_2", "sdpa", "eager".
 source_path="./"
