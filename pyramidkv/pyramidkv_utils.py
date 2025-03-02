@@ -332,10 +332,6 @@ class SnapKVCluster():
                 attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
             else:
                 raise ValueError('Pooling method not supported')
-<<<<<<< HEAD
-            attn_cache = attn_weights_sum
-=======
->>>>>>> 8896ab1bccbd78e09fddc62229142224090ef3d3
             indices = attn_cache.topk(self.max_capacity_prompt - self.window_size, dim=-1).indices
             indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
 
