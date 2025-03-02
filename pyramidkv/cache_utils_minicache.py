@@ -625,8 +625,10 @@ class DynamicCache(Cache):
                 # print(selected_keys[j].shape)
                 self.retained_value_cache[j] = selected_values[j]
             print('complete')
+            for i in range(32):
+                self.indices[i] = None
             # delete all temporary variables only keep the final key and value caches
-            del temp_key, retained_keys, retained_values, layer_indices_full, layer_indices_compress, combined_range, all_indices, index_expanded, compress_index_expanded, selected_keys, selected_values, unselected_keys, unselected_values
+            del temp_key, retained_keys, retained_values, layer_indices_full, layer_indices_compress, combined_range, all_indices, index_expanded, compress_index_expanded, selected_keys, selected_values, unselected_keys, unselected_values, 
             torch.cuda.empty_cache()
 
         # if layer_idx == 31:
