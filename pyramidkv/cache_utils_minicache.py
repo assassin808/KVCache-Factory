@@ -322,8 +322,11 @@ class DynamicCache(Cache):
         mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
         mask = mask.to(key_states.device)
         attention_mask = mask[None, None, :, :]
-
-
+        # ret_value = (self.retained_key_cache[layer_idx].clone(), self.retained_value_cache[layer_idx].clone(), self.hidden_states[layer_idx])
+        # self.indices.append(None)
+        # if layer_idx == 31:
+        #     print('compatibility')
+        # return ret_value[0], ret_value[1], ret_value[2]
         if False:
             self.indices.append(None)
             ret_value = (self.retained_key_cache[layer_idx].clone(), self.retained_value_cache[layer_idx].clone(), self.hidden_states[layer_idx])
@@ -431,6 +434,7 @@ class DynamicCache(Cache):
 
             return ret_value[0], ret_value[1], ret_value[2]
         if layer_idx == 31:
+            print('31 comple')
             num_segments = 1
             segment_size = self.retained_key_cache[0].shape[2] // num_segments
             attn_lis = []
@@ -454,7 +458,7 @@ class DynamicCache(Cache):
                 attn_weights = prev_segment
                 attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(self.retained_key_cache[i].dtype)
                 attn_weights_sum_prev = attn_weights[:, :, -window_size:, sink_size:-window_size ].sum(dim = -2)
-                all_indices = (F.max_pool1d(attn_weights_sum_prev, kernel_size = 7, padding=7//2, stride=1)).topk((2374-window_size-sink_size), dim=-1).indices #[1,h,10]
+                all_indices = (F.max_pool1d(attn_weights_sum_prev, kernel_size = 7, padding=7//2, stride=1)).topk((2374//10-window_size-sink_size), dim=-1).indices #[1,h,10]
                 for j in range(32):
                     if abs(i-j)>5:
                         continue
@@ -508,7 +512,7 @@ class DynamicCache(Cache):
                 # del p, p_expanded
                 attn_diff[i] = F.max_pool1d(attn_diff[i], kernel_size = 7, padding=7//2, stride=1)
                 selected_attn_diff =torch.gather(attn_diff[i], dim=-1, index=all_indices)
-                indices = selected_attn_diff.topk((int(2374*0.6) - window_size - sink_size), dim=-1).indices
+                indices = selected_attn_diff.topk((int(2374//10*0.6) - window_size - sink_size), dim=-1).indices
                 indices = torch.gather(all_indices, dim=-1, index=indices)
 
                 final_indices_expanded = indices.unsqueeze(-1)  # Shape: [batch, heads, k_final, 1]
@@ -624,9 +628,8 @@ class DynamicCache(Cache):
                 self.retained_key_cache[j] = selected_keys[j]
                 # print(selected_keys[j].shape)
                 self.retained_value_cache[j] = selected_values[j]
-            print('complete')
             # delete all temporary variables only keep the final key and value caches
-            del temp_key, retained_keys, retained_values, layer_indices_full, layer_indices_compress, combined_range, all_indices, index_expanded, compress_index_expanded, selected_keys, selected_values, unselected_keys, unselected_values
+            # del temp_key, retained_keys, retained_values, layer_indices_full, layer_indices_compress, combined_range, all_indices, index_expanded, compress_index_expanded, selected_keys, selected_values, unselected_keys, unselected_values
 
         # if layer_idx == 31:
         #     counter = [0 for i in range(32)]

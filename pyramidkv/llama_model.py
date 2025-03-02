@@ -531,8 +531,10 @@ def llama_attn_forward_MiniCache(
     if past_key_value is not None:
         # sin and cos are specific to RoPE models; cache_position needed for the static cache
         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-
+        isprefill = False
         if key_states.shape[-2] == kv_seq_len:
+            isprefill = True
+            print('prefill')
             self.kv_seq_len = kv_seq_len
             self.prefill_len = kv_seq_len
             key_states, value_states, hidden_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs, hidden_states, query_states, attention_mask)
@@ -546,6 +548,7 @@ def llama_attn_forward_MiniCache(
 
             # past_key_value.update_miniCache(retained_key_states, retained_value_states, unit_key_states, unit_value_states, key_magnitude, value_magnitude, mask_k, mask_v, previous_retained_key_states, previous_retained_value_states, self.layer_idx, self.config.num_hidden_layers)
         else:
+            print('decode')
             self.kv_seq_len += q_len
             key_states, value_states = past_key_value.update_miniCache_decode(key_states, value_states, self.layer_idx, self.config.num_hidden_layers, cache_kwargs)
             past_key_value.decode_q.append(query_states.clone())
@@ -561,9 +564,10 @@ def llama_attn_forward_MiniCache(
                 past_key_value.decode_q.clear()
         past_key_value._seen_tokens=self.kv_seq_len
 
-    # print(key_states.shape[-2],self.prefill_len)
-    if past_key_value is not None and key_states.shape[-2] != self.prefill_len:
+    print(key_states.shape[-2],self.prefill_len)
+    if past_key_value is not None and not isprefill:
         # print(self.prefill_len-8)
+        print('in decode')
 
         # upcast attention to fp32
         selected_keys = past_key_value.retained_key_cache[self.layer_idx]
@@ -611,6 +615,7 @@ def llama_attn_forward_MiniCache(
         # attn_output =   attn_output_proximal
         # attn_output =  0.1 * attn_output + 0.9 * attn_output_proximal
     else:
+        print('in prefill')
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
         if attention_mask is not None:  # no matter the length, we just slice it
