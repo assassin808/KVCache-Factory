@@ -527,7 +527,6 @@ def llama_attn_forward_MiniCache(
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
-    query_states_old = query_states.clone()
     if past_key_value is not None:
         # sin and cos are specific to RoPE models; cache_position needed for the static cache
         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
@@ -535,7 +534,7 @@ def llama_attn_forward_MiniCache(
         if key_states.shape[-2] == kv_seq_len:
             self.kv_seq_len = kv_seq_len
             self.prefill_len = kv_seq_len
-            key_states, value_states, hidden_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs, hidden_states, query_states, attention_mask)
+            _, _, _ = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs, hidden_states, query_states, attention_mask)
 
             # if self.layer_idx == 0:
             #     previous_key_states, previous_value_states, previous_hidden_states = None, None, None
@@ -548,7 +547,8 @@ def llama_attn_forward_MiniCache(
         else:
             self.kv_seq_len += q_len
             key_states, value_states = past_key_value.update_miniCache_decode(key_states, value_states, self.layer_idx, self.config.num_hidden_layers, cache_kwargs)
-            past_key_value.decode_q.append(query_states.clone())
+            query_states_old = query_states.clone()
+            past_key_value.decode_q.append(query_states_old)
             # print(past_key_value.decode_q)
             for item in past_key_value.layer_map:
                 # print(item, len(past_key_value.decode_q)-1)

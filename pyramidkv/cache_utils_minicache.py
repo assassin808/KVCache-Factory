@@ -528,9 +528,9 @@ class DynamicCache(Cache):
 
         layer_map.sort(key=lambda x:-x[-2])#from high to low
 
-        ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], self.hidden_states[layer_idx])
-
-        temp_key = [i for i in self.retained_key_cache]
+        ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], None)
+        if layer_idx == 31:
+            temp_key = [i.clone() for i in self.retained_key_cache]
         # temp_value = [i.clone() for i in self.retained_value_cache]
         used_segment = set()
         replaced_segment = set()
@@ -631,26 +631,6 @@ class DynamicCache(Cache):
             del temp_key, retained_keys, retained_values, layer_indices_full, layer_indices_compress, combined_range, all_indices, index_expanded, compress_index_expanded, selected_keys, selected_values, unselected_keys, unselected_values, 
             torch.cuda.empty_cache()
 
-        # if layer_idx == 31:
-        #     counter = [0 for i in range(32)]
-        #     for item in self.layer_map:
-        #         counter[item[1]]+=1
-        #     print(counter)
-        # del temp_key, temp_value
-        # if layer_idx == 31:
-        #     with open('layer_map.csv', 'w') as f:
-        #         for item in self.layer_map:
-        #             f.write(','.join([str(i) for i in item]) + '\n')
-        #     exit(0)
-        # with open('layer_map.csv', 'r') as f:
-        #     layer_map = []
-        #     for line in f:
-        #         layer_map.append([i for i in line.strip().split(',')])
-        #         for i in range(5):
-        #             layer_map[-1][i] = int(layer_map[-1][i])
-        #         layer_map[-1][5] = float(layer_map[-1][5])
-        #         layer_map[-1][6] = float(layer_map[-1][6])
-                
         return ret_value[0], ret_value[1], ret_value[2]
     def update_miniCache(
             self,
