@@ -724,6 +724,8 @@ def llama_flash_attn2_forward_MiniCache(
             query_states_old = query_states.clone()
             past_key_value.decode_q.append(query_states_old)
             # print(past_key_value.decode_q)
+            import time
+            a = time.time()
             for item in past_key_value.layer_map:
                 # print(item, len(past_key_value.decode_q)-1)
                 if len(past_key_value.decode_q)-1 == item[1]:
@@ -731,6 +733,7 @@ def llama_flash_attn2_forward_MiniCache(
                     # print(past_key_value.decode_q[item[0]][:,item[3],:,:].sum().isnan())
                     query_states[:,item[4],:,:] = past_key_value.decode_q[item[0]][:,item[3],:,:]
                     # print(item[-1])
+            print(time.time()-a)
             if len(past_key_value.decode_q) == 32:
                 past_key_value.decode_q.clear()
         past_key_value._seen_tokens=self.kv_seq_len
@@ -742,30 +745,22 @@ def llama_flash_attn2_forward_MiniCache(
         unselected_keys = past_key_value.key_unit_cache[self.layer_idx]
         unselected_values = past_key_value.value_unit_cache[self.layer_idx]
 
-        attn_weights = torch.matmul(query_states, unselected_keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-        attn_weights_proximal = torch.matmul(query_states_old, selected_keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-       
-
-
-        max_weight = (attn_weights.max(dim=-1,keepdim=True)[0] + attn_weights_proximal.max(dim=-1,keepdim=True)[0] + abs(attn_weights.max(dim=-1,keepdim=True)[0] - attn_weights_proximal.max(dim=-1,keepdim=True)[0]))/2
-
-        sum_exp_attn_weights_proximal = torch.sum(torch.exp(attn_weights_proximal-max_weight), dim=-1, keepdim=True)
-
-
-        sum_exp_attn_weights = torch.sum(torch.exp(attn_weights-max_weight), dim=-1, keepdim=True)
-        # print(query_states.sum().isnan(),key_states[:,:,128:self.prefill_len-128,:].sum().isnan())
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-
-        attn_weights_proximal = nn.functional.softmax(attn_weights_proximal, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_weights_proximal = nn.functional.dropout(attn_weights_proximal, p=self.attention_dropout, training=self.training)
-
-        gate = sum_exp_attn_weights_proximal / (sum_exp_attn_weights + sum_exp_attn_weights_proximal)
-
-        gate[gate.isnan()] = 0.9
-
-        gate = gate.transpose(1, 2)
+        scale = 1 / math.sqrt(self.head_dim)
+        raw_attn_scores = torch.matmul(query_states, unselected_keys.transpose(2, 3)) * scale
+        raw_proximal_scores = torch.matmul(query_states_old, selected_keys.transpose(2, 3)) * scale
+        max_score = torch.maximum(
+            raw_attn_scores.amax(dim=-1, keepdim=True),
+            raw_proximal_scores.amax(dim=-1, keepdim=True)
+        )
+        
+        sum_exp_distal = torch.logsumexp(raw_attn_scores - max_score, dim=-1, keepdim=True)
+        sum_exp_proximal = torch.logsumexp(raw_proximal_scores - max_score, dim=-1, keepdim=True)
+        gate = torch.exp(sum_exp_proximal - max_score) / (
+            torch.exp(sum_exp_distal - max_score) + 
+            torch.exp(sum_exp_proximal - max_score) + 
+            1e-8
+        )
+        gate = torch.nan_to_num(gate, 0.9)
 
         query_states = query_states.transpose(1, 2)
         query_states_old = query_states_old.transpose(1, 2)
