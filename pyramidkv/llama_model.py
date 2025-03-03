@@ -724,8 +724,6 @@ def llama_flash_attn2_forward_MiniCache(
             query_states_old = query_states.clone()
             past_key_value.decode_q.append(query_states_old)
             # print(past_key_value.decode_q)
-            import time
-            a = time.time()
             for item in past_key_value.layer_map:
                 # print(item, len(past_key_value.decode_q)-1)
                 if len(past_key_value.decode_q)-1 == item[1]:
@@ -733,7 +731,6 @@ def llama_flash_attn2_forward_MiniCache(
                     # print(past_key_value.decode_q[item[0]][:,item[3],:,:].sum().isnan())
                     query_states[:,item[4],:,:] = past_key_value.decode_q[item[0]][:,item[3],:,:]
                     # print(item[-1])
-            print(time.time()-a)
             if len(past_key_value.decode_q) == 32:
                 past_key_value.decode_q.clear()
         past_key_value._seen_tokens=self.kv_seq_len

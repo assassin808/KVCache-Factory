@@ -443,7 +443,15 @@ class DynamicCache(Cache):
                         layer_map[-1][i] = int(layer_map[-1][i])
                     layer_map[-1][5] = float(layer_map[-1][5])
                     layer_map[-1][6] = float(layer_map[-1][6])
-           
+            # for i in range(32):
+            #     prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+            #     prev_segment[:, :, -window_size:, -window_size:] += attention_mask
+            #     attn_weights = prev_segment
+            #     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(self.retained_key_cache[i].dtype)
+            #     attn_weights_sum_prev = attn_weights[:, :, -window_size:, sink_size:-window_size ].sum(dim = -2)
+            #     attn_lis.append(
+            #         attn_weights_sum_prev
+            #     )
             for i in range(32):
                 attn_diff[i] = None
                 
@@ -493,14 +501,12 @@ class DynamicCache(Cache):
                 self.indices.append((updated_all_indices + sink_size, indices.clone() + sink_size))
 
 
-        layer_map.sort(key=lambda x:-x[-2])#from high to low
+        # layer_map.sort(key=lambda x:-x[-2])#from high to low
 
         ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], None)
         if layer_idx == 31:
             temp_key = [i.clone() for i in self.retained_key_cache]
         # temp_value = [i.clone() for i in self.retained_value_cache]
-        used_segment = set()
-        replaced_segment = set()
         # Collect all indices and values for batched updates
         if layer_idx == 31:
             sink_indices = torch.arange(0, sink_size, device=self.retained_key_cache[0].device)
@@ -591,7 +597,7 @@ class DynamicCache(Cache):
                 self.retained_key_cache[j] = selected_keys[j]
                 # print(selected_keys[j].shape)
                 self.retained_value_cache[j] = selected_values[j]
-            print('complete')
+            # print('complete')
             for i in range(32):
                 self.indices[i] = None
             # delete all temporary variables only keep the final key and value caches
