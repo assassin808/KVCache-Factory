@@ -762,6 +762,8 @@ def llama_flash_attn2_forward_MiniCache(
         )
         gate = torch.nan_to_num(gate, 0.9)
 
+        gate = gate.transpose(1, 2)
+
         query_states = query_states.transpose(1, 2)
         query_states_old = query_states_old.transpose(1, 2)
         dropout_rate = self.attention_dropout if self.training else 0.0
