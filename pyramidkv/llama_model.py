@@ -527,10 +527,11 @@ def llama_attn_forward_MiniCache(
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
+    # print('before',torch.cuda.memory_summary())
     if past_key_value is not None:
         # sin and cos are specific to RoPE models; cache_position needed for the static cache
         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-
+        
         if key_states.shape[-2] == kv_seq_len:
             self.kv_seq_len = kv_seq_len
             self.prefill_len = kv_seq_len
@@ -560,7 +561,7 @@ def llama_attn_forward_MiniCache(
             if len(past_key_value.decode_q) == 32:
                 past_key_value.decode_q.clear()
         past_key_value._seen_tokens=self.kv_seq_len
-
+    # print('after',torch.cuda.memory_summary())
     # print(key_states.shape[-2],self.prefill_len)
     if past_key_value is not None and key_states.shape[-2] != self.prefill_len:
         # print(self.prefill_len-8)
@@ -682,7 +683,7 @@ def llama_flash_attn2_forward_MiniCache(
     query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
     key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
     value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-    query_states_old = query_states.clone()
+    
     
     kv_seq_len = key_states.shape[-2]
     # if past_key_value is not None:
@@ -716,11 +717,12 @@ def llama_flash_attn2_forward_MiniCache(
         if key_states.shape[-2] == kv_seq_len: # [SnapKV] add kv_cluster
             self.kv_seq_len = kv_seq_len # [SnapKV] register kv_seq_len
             self.prefill_len = kv_seq_len
-            key_states, value_states, hidden_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs, hidden_states, query_states, attention_mask)
+            _, _, _ = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs, hidden_states, query_states, attention_mask)
         else:
             self.kv_seq_len += q_len
             key_states, value_states = past_key_value.update_miniCache_decode(key_states, value_states, self.layer_idx, self.config.num_hidden_layers, cache_kwargs)
-            past_key_value.decode_q.append(query_states.clone())
+            query_states_old = query_states.clone()
+            past_key_value.decode_q.append(query_states_old)
             # print(past_key_value.decode_q)
             for item in past_key_value.layer_map:
                 # print(item, len(past_key_value.decode_q)-1)
@@ -766,14 +768,15 @@ def llama_flash_attn2_forward_MiniCache(
         gate = gate.transpose(1, 2)
 
         query_states = query_states.transpose(1, 2)
+        query_states_old = query_states_old.transpose(1, 2)
         dropout_rate = self.attention_dropout if self.training else 0.0
 
 
         attn_output_proximal = _flash_attention_forward(
-        self, query_states, unselected_keys.transpose(1, 2), unselected_values.transpose(1, 2), attention_mask, q_len, dropout=dropout_rate)
+        self, query_states_old, selected_keys.transpose(1, 2), selected_values.transpose(1, 2), attention_mask, q_len, dropout=dropout_rate)
 
         attn_output = _flash_attention_forward(
-        self, query_states, selected_keys.transpose(1, 2), selected_values.transpose(1, 2), attention_mask, q_len, dropout=dropout_rate)
+        self, query_states, unselected_keys.transpose(1, 2), unselected_values.transpose(1, 2), attention_mask, q_len, dropout=dropout_rate)
         # print(attn_output.shape,attn_output_proximal.shape,gate.shape)
         attn_output =  (1 - gate) * attn_output + gate * attn_output_proximal
         

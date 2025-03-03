@@ -548,7 +548,7 @@ class DynamicCache(Cache):
                 hi_list.append(hi)
                 hj_list.append(hj)
                 lis_list.append(self.indices[j][1][0][hj])
-                _lis_list.append(self.indices[j][0][0][hj])
+                _lis_list.append(self.indices[i][0][0][hi])
 
             # Convert lists to tensors
             i_tensor = torch.tensor(i_list, device=self.retained_key_cache[0].device)
@@ -628,7 +628,7 @@ class DynamicCache(Cache):
             for i in range(32):
                 self.indices[i] = None
             # delete all temporary variables only keep the final key and value caches
-            del temp_key, retained_keys, retained_values, layer_indices_full, layer_indices_compress, combined_range, all_indices, index_expanded, compress_index_expanded, selected_keys, selected_values, unselected_keys, unselected_values, 
+            del temp_key, retained_keys, retained_values, layer_indices_full, layer_indices_compress, combined_range, all_indices, index_expanded, compress_index_expanded, selected_keys, selected_values, unselected_keys, unselected_values, self.query_cache
             torch.cuda.empty_cache()
 
         return ret_value[0], ret_value[1], ret_value[2]
