@@ -322,7 +322,7 @@ class DynamicCache(Cache):
         mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
         mask = mask.to(key_states.device)
         attention_mask = mask[None, None, :, :]
-        scaled_size = min(2374, self.retained_key_cache[0].shape[2])
+        scaled_size = min(296, self.retained_key_cache[0].shape[2])
 
         if False:
             self.indices.append(None)
