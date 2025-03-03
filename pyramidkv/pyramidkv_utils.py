@@ -287,12 +287,12 @@ class SnapKVCluster():
         self.window_size = window_size
         self.max_capacity_prompt = max_capacity_prompt
         assert self.max_capacity_prompt - self.window_size > 0
-        self.kernel_size = kernel_size
+        self.kernel_size = kernel_size 
         self.pooling = pooling
         self.merge = merge
         self.recent_size = recent_size
         self.ratio = ratio
-        print(pooling,kernel_size)
+        # print(pooling,kernel_size)
 
     def reset(self, window_size = 64, max_capacity_prompt = 256 + 64, kernel_size = 5, pooling = 'avgpool', merge = None):
         self.window_size = window_size
@@ -323,7 +323,6 @@ class SnapKVCluster():
             attention_mask = mask[None, None, :, :]
 
             attn_weights[:, :, -self.window_size:, -self.window_size:] += attention_mask
-
             attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
             attn_weights_sum = attn_weights[:, :, -self.window_size:, : -self.window_size].sum(dim = -2)
             if self.pooling == 'avgpool':
