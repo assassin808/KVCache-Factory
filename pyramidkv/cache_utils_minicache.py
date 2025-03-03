@@ -322,7 +322,7 @@ class DynamicCache(Cache):
         mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
         mask = mask.to(key_states.device)
         attention_mask = mask[None, None, :, :]
-        scaled_size = min(296, self.retained_key_cache[0].shape[2])
+        scaled_size = min(2580, self.retained_key_cache[0].shape[2])
 
         if False:
             self.indices.append(None)
@@ -483,7 +483,7 @@ class DynamicCache(Cache):
 
                 attn_diff[i] = F.max_pool1d(attn_diff[i], kernel_size = 7, padding=7//2, stride=1)
                 selected_attn_diff =torch.gather(attn_diff[i], dim=-1, index=all_indices)
-                indices = selected_attn_diff.topk((int(scaled_size*0.6) - window_size - sink_size), dim=-1).indices
+                indices = selected_attn_diff.topk((int(scaled_size*0.4) - window_size - sink_size), dim=-1).indices
                 indices = torch.gather(all_indices, dim=-1, index=indices)
 
                 final_indices_expanded = indices.unsqueeze(-1)  # Shape: [batch, heads, k_final, 1]
