@@ -22,7 +22,7 @@ from pyramidkv.pyramidkv_utils import DynamicCacheSplitHeadFlatten
 logger = logging.get_logger(__name__)
 
 def _flash_attention_forward(
-    self, query_states, key_states, value_states, attention_mask, query_length, dropout=0.0, softmax_scale=None
+    self, query_states, key_states, value_states, attention_mask, query_length, dropout=0.0, softmax_scale=None, return_attn_probs = False
 ):
     """
     Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token
@@ -59,18 +59,34 @@ def _flash_attention_forward(
         cu_seqlens_q, cu_seqlens_k = cu_seq_lens
         max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
 
-        attn_output_unpad = flash_attn_varlen_func(
-            query_states,
-            key_states,
-            value_states,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=max_seqlen_in_batch_q,
-            max_seqlen_k=max_seqlen_in_batch_k,
-            dropout_p=dropout,
-            softmax_scale=softmax_scale,
-            causal=causal,
-        )
+        log_attn_weight = None
+        if return_attn_probs:
+            attn_output_unpad, log_attn_weight, _ = flash_attn_varlen_func(
+                query_states,
+                key_states,
+                value_states,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=max_seqlen_in_batch_q,
+                max_seqlen_k=max_seqlen_in_batch_k,
+                dropout_p=dropout,
+                softmax_scale=softmax_scale,
+                causal=causal,
+                return_attn_probs = return_attn_probs
+            )
+        else:
+            attn_output_unpad = flash_attn_varlen_func(
+                query_states,
+                key_states,
+                value_states,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=max_seqlen_in_batch_q,
+                max_seqlen_k=max_seqlen_in_batch_k,
+                dropout_p=dropout,
+                softmax_scale=softmax_scale,
+                causal=causal
+            )
 
         attn_output = pad_input(attn_output_unpad, indices_q, batch_size, query_length)
     else:
@@ -80,7 +96,8 @@ def _flash_attention_forward(
 
     # if self.layer_idx == 0:
     #     import pdb; pdb.set_trace()
-
+    if return_attn_probs:
+        return attn_output, log_attn_weight
     return attn_output
 
 
