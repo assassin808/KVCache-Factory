@@ -323,6 +323,7 @@ class DynamicCache(Cache):
             mask = mask.to(key_states.device)
             attention_mask = mask[None, None, :, :]
             scaled_size = min(285, self.retained_key_cache[0].shape[2])
+            ratio = 0.7
 
         if False:
             self.indices.append(None)
@@ -455,7 +456,17 @@ class DynamicCache(Cache):
                 )
             for i in range(32):
                 attn_diff[i] = None
-                
+                min_num = (256-16)//2
+                max_num = 2*(256-16) - min_num
+
+                steps = (max_num - min_num) / 31
+                max_capacity_prompt = int(max_num - steps * i)
+                scaled_size = max_capacity_prompt + 16
+                ratio = 0.2 + (0.8-0.2)/31*i
+                def f(a,n=256):
+                    return int(n/(10/32+22/32*(a+1)/2))
+                def g(y,n=256):
+                    return (n/y-10/32)*2*32/22-1
                 # prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
                 # # p = prev_segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
                 # # p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D]
@@ -464,7 +475,8 @@ class DynamicCache(Cache):
                 # attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(self.retained_key_cache[i].dtype)
                 # attn_weights_sum_prev = attn_weights[:, :, -window_size:, sink_size:-window_size ].sum(dim = -2)
                 attn_weights_sum_prev = attn_lis[i]
-                all_indices = (F.max_pool1d(attn_weights_sum_prev, kernel_size = 7, padding=7//2, stride=1)).topk((scaled_size-window_size-sink_size), dim=-1).indices #[1,h,10]
+                all_indices = (F.max_pool1d(attn_weights_sum_prev, kernel_size = 7, padding=7//2, stride=1)).topk((f(ratio,scaled_size)-window_size-sink_size), dim=-1).indices #[1,h,10]
+                counter = 0
                 for j in range(32):
                     if abs(i-j)>5:
                         continue
@@ -481,12 +493,16 @@ class DynamicCache(Cache):
                     # diff = F.max_pool1d(diff, kernel_size = 7, padding=7//2, stride=1)
                     if attn_diff[i] == None:
                         attn_diff[i] = diff
+                        # counter +=1
                     else:
+                        # attn_diff[i] *= counter
                         attn_diff[i] += diff
+                        # counter +=1
+                        # attn_diff[i]/=counter
 
                 attn_diff[i] = F.max_pool1d(attn_diff[i], kernel_size = 7, padding=7//2, stride=1)
                 selected_attn_diff =torch.gather(attn_diff[i], dim=-1, index=all_indices)
-                indices = selected_attn_diff.topk((int(scaled_size*0.7) - window_size - sink_size), dim=-1).indices
+                indices = selected_attn_diff.topk((int(f(ratio,scaled_size)*ratio) - window_size - sink_size), dim=-1).indices
                 indices = torch.gather(all_indices, dim=-1, index=indices)
 
                 final_indices_expanded = indices.unsqueeze(-1)  # Shape: [batch, heads, k_final, 1]
@@ -502,6 +518,9 @@ class DynamicCache(Cache):
                 updated_all_indices = updated_all_indices.reshape(all_indices.shape[0], all_indices.shape[1], -1)
                 
                 self.indices.append((updated_all_indices + sink_size, indices + sink_size))
+        # if layer_idx == 31:
+        #     for i in attn_diff.keys():
+        #         print(i,attn_diff[i].mean())
         if layer_idx == 31:
             temp_key = [i.clone() for i in self.retained_key_cache]
         # temp_value = [i.clone() for i in self.retained_value_cache]
@@ -526,8 +545,8 @@ class DynamicCache(Cache):
             j_tensor = torch.tensor(j_list, device=self.retained_key_cache[0].device)
             hi_tensor = torch.tensor(hi_list, device=self.retained_key_cache[0].device)
             hj_tensor = torch.tensor(hj_list, device=self.retained_key_cache[0].device)
-            lis_tensor = torch.stack(lis_list)  # Shape: [num_items, M]
-            _lis_tensor = torch.stack(_lis_list)  # Shape: [num_items, M]
+            lis_tensor = lis_list
+            _lis_tensor = _lis_list
 
             # Perform batched updates
             # Inside the batched updates loop where layer_map is processed
@@ -556,47 +575,41 @@ class DynamicCache(Cache):
                 # self.retained_value_cache[j][:, :, -8:, :] = temp_value[i][:, :, -8:, :]
         if layer_idx == 31:
             device = self.retained_key_cache[0].device
-            # Convert lists to tensors (example shapes)
-            retained_keys = torch.stack(self.retained_key_cache)  # Shape: [32, 1, H, N, D]
-            retained_values = torch.stack(self.retained_value_cache)
-            layer_indices_full = torch.stack([i[1] for i in self.indices])  # Shape: [32, 1, H, M]
-            layer_indices_compress = torch.stack([i[0] for i in self.indices])
-
-            # Precompute combined_range for all layers
-            seq_len = retained_keys.shape[-2]
-            combined_range = torch.cat([
-                torch.arange(0, sink_size, device=device),
-                torch.arange(seq_len - window_size, seq_len, device=device)
-            ])
-            combined_range = combined_range.view(1, 1, 1, -1).expand(32, 1, layer_indices_full.size(2), -1)
-
-            # Concatenate indices and gather
-            all_indices = torch.cat([layer_indices_full, combined_range], dim=-1)
-            index_expanded = all_indices.unsqueeze(-1).expand(-1, -1, -1, -1, retained_keys.size(-1))
-            compress_index_expanded = layer_indices_compress.unsqueeze(-1).expand(-1, -1, -1, -1, retained_keys.size(-1))
-            selected_keys = torch.gather(retained_keys, 3, index_expanded)
-            selected_values = torch.gather(retained_values, 3, index_expanded)
-            unselected_keys = torch.gather(retained_keys, 3, compress_index_expanded)
-            unselected_values = torch.gather(retained_values, 3, compress_index_expanded)
-
-            # Create mask and unselected entries
-            # mask = torch.ones((32, 1, layer_indices.size(2), seq_len), dtype=torch.bool, device=device)
-            # mask.scatter_(3, all_indices, False)
-            # unselected_keys = retained_keys[mask].view(32, 1, layer_indices.size(2), -1, retained_keys.size(-1))
-            # unselected_values = retained_values[mask].view(32, 1, layer_indices.size(2), -1, retained_values.size(-1))
-
-
-            # Update caches in-place
+            
+            # Process each layer individually
             for j in range(32):
-                self.key_unit_cache[j] = unselected_keys[j]
-                # print(unselected_keys[j].shape)
-                self.value_unit_cache[j] = unselected_values[j]
-                self.retained_key_cache[j] = selected_keys[j]
-                # print(selected_keys[j].shape)
-                self.retained_value_cache[j] = selected_values[j]
-            # print('complete')
-            for i in range(32):
-                self.indices[i] = None
+                # Get sequence length for this layer
+                seq_len = self.retained_key_cache[j].shape[-2]
+                
+                # Create combined indices for this layer
+                window_start = seq_len - window_size
+                window_indices = torch.arange(window_start, seq_len, device=device)
+                combined_indices = torch.cat([sink_indices, window_indices])
+                
+                # Get layer-specific indices
+                layer_indices_full = self.indices[j][1]  # [1, H, M]
+                layer_indices_compress = self.indices[j][0]  # [1, H, M_compress]
+                
+                # Combine with sink/window indices
+                combined_expanded = combined_indices.view(1, 1, -1).expand(1, layer_indices_full.size(1), -1)
+                all_indices = torch.cat([layer_indices_full, combined_expanded], dim=-1)
+                
+                # Gather indices
+                index_expanded = all_indices.unsqueeze(-1).expand(-1, -1, -1, self.retained_key_cache[j].size(-1))
+                selected_keys = torch.gather(self.retained_key_cache[j], 2, index_expanded)
+                selected_values = torch.gather(self.retained_value_cache[j], 2, index_expanded)
+                
+                # Gather compressed indices
+                compress_index_expanded = layer_indices_compress.unsqueeze(-1).expand(-1, -1, -1, self.retained_key_cache[j].size(-1))
+                unselected_keys = torch.gather(self.retained_key_cache[j], 2, compress_index_expanded)
+                unselected_values = torch.gather(self.retained_value_cache[j], 2, compress_index_expanded)
+                
+                # Update caches for this layer
+                self.key_unit_cache[j] = unselected_keys
+                self.value_unit_cache[j] = unselected_values
+                self.retained_key_cache[j] = selected_keys
+                self.retained_value_cache[j] = selected_values
+                self.indices[j] = None
             # item in self.layer_map is (i, j, seg, hi, hj, sim, scaling)
             # now we cast layer map to a dict with (j,hj) as key and (i,hi) as value.
             # Convert layer_map to a nested dictionary for per-layer storage
@@ -612,7 +625,7 @@ class DynamicCache(Cache):
             self.layer_map = layer_map
             
             # delete all temporary variables only keep the final key and value caches
-            del temp_key, retained_keys, retained_values, layer_indices_full, layer_indices_compress, combined_range, all_indices, index_expanded, compress_index_expanded, selected_keys, selected_values, unselected_keys, unselected_values, self.query_cache
+            del temp_key, self.query_cache
             torch.cuda.empty_cache()
 
         # layer_map.sort(key=lambda x:-x[-2])#from high to low
