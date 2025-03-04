@@ -90,9 +90,13 @@ def _flash_attention_forward(
 
         attn_output = pad_input(attn_output_unpad, indices_q, batch_size, query_length)
     else:
-        attn_output = flash_attn_func(
-            query_states, key_states, value_states, dropout, softmax_scale=softmax_scale, causal=causal
-        )
+        if return_attn_probs:
+            attn_output, log_attn_weight = flash_attn_func(
+            query_states, key_states, value_states, dropout, softmax_scale=softmax_scale, causal=causal, return_attn_probs = return_attn_probs)
+        else:
+            attn_output = flash_attn_func(
+            query_states, key_states, value_states, dropout, softmax_scale=softmax_scale, causal=causal)
+        
 
     # if self.layer_idx == 0:
     #     import pdb; pdb.set_trace()
