@@ -526,8 +526,8 @@ class DynamicCache(Cache):
             j_tensor = torch.tensor(j_list, device=self.retained_key_cache[0].device)
             hi_tensor = torch.tensor(hi_list, device=self.retained_key_cache[0].device)
             hj_tensor = torch.tensor(hj_list, device=self.retained_key_cache[0].device)
-            lis_tensor = torch.tensor(lis_list, device=self.retained_key_cache[0].device)  # Shape: [num_items, M]
-            _lis_tensor = torch.tensor(_lis_list, device=self.retained_key_cache[0].device)  # Shape: [num_items, M]
+            lis_tensor = lis_list
+            _lis_tensor = _lis_list
 
             # Perform batched updates
             # Inside the batched updates loop where layer_map is processed

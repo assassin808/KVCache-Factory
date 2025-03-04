@@ -758,17 +758,9 @@ def llama_flash_attn2_forward_MiniCache(
         unselected_keys = past_key_value.key_unit_cache[self.layer_idx]
         unselected_values = past_key_value.value_unit_cache[self.layer_idx]
 
-    
-        dropout_rate = self.attention_dropout if self.training else 0.0
-        
-        attn_output_proximal, sum_exp_proximal = _flash_attention_forward(
-        self, query_states_old, selected_keys.transpose(1, 2), selected_values.transpose(1, 2), attention_mask, q_len, dropout=dropout_rate, return_attn_probs = True)
-
-        attn_output, sum_exp_distal = _flash_attention_forward(
-        self, query_states, unselected_keys.transpose(1, 2), unselected_values.transpose(1, 2), attention_mask, q_len, dropout=dropout_rate, return_attn_probs = True)
 
         # print(past_key_value.decode_q)
-        layer_idx = len(past_key_value.decode_q)-1
+        layer_idx = len(past_key_value.decode_q)
         temp = past_key_value.layer_map[layer_idx]
         hj_selected = []
         for hj,(i,hi) in temp.items():
@@ -778,45 +770,68 @@ def llama_flash_attn2_forward_MiniCache(
         attn_weights = torch.matmul(query_states[:,hj_unselected,:,:], unselected_keys[:,hj_unselected,:,:].transpose(2, 3)) / math.sqrt(self.head_dim)
 
 
-        sum_exp_attn_weights = torch.sum(torch.exp(attn_weights), dim=-1, keepdim=True)
+        sum_exp_attn_weights = torch.sum(torch.exp(attn_weights), dim=-1, keepdim=True).log()
         # print(query_states.sum().isnan(),key_states[:,:,128:self.prefill_len-128,:].sum().isnan())
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
       
-        
+        if len(hj_selected)!=0:
+            # 1. Retrieve cached attention for selected heads
+            # print(len(past_key_value.decode_q))
+            # print(temp.items())
+            past_attn = torch.stack(
+                [past_key_value.decode_q[i][0][:,hi,:,:] for hj,(i,hi) in temp.items()], 
+                dim=1  # Stack along head dimension
+            )
+            past_attn_sum = torch.stack(
+                [past_key_value.decode_q[i][1][:,hi,:,:] for hj,(i,hi) in temp.items()], 
+                dim=1  # Stack along head dimension
+            )
 
-        # 1. Retrieve cached attention for selected heads
-        past_attn = torch.stack(
-            [past_key_value.attn[i][hi] for hj,(i,hi) in temp.items()], 
-            dim=1  # Stack along head dimension
-        )
+            # 2. Concatenate current & cached attention (temporary order)
+            combined_attn = torch.cat([
+                attn_weights,  # Current unselected heads (hi_unselected order)
+                past_attn      # Cached selected heads (hi_list order)
+            ], dim=1)
+            combined_attn_sum = torch.cat([
+                sum_exp_attn_weights,  # Current unselected heads (hi_unselected order)
+                past_attn_sum      # Cached selected heads (hi_list order)
+            ], dim=1)
 
-        # 2. Concatenate current & cached attention (temporary order)
-        combined_attn = torch.cat([
-            attn_weights,  # Current unselected heads (hi_unselected order)
-            past_attn      # Cached selected heads (hi_list order)
-        ], dim=1)
+            # 3. Create index mapping for original head order
+            all_heads = hj_unselected + hj_selected  # Temporary concatenated order
+            original_order = sorted(
+                range(len(all_heads)),
+                key=lambda k: all_heads[k]  # Sort by original head index
+            )
 
-        # 3. Create index mapping for original head order
-        all_heads = hj_unselected + hj_selected  # Temporary concatenated order
-        original_order = sorted(
-            range(len(all_heads)),
-            key=lambda k: all_heads[k]  # Sort by original head index
-        )
+            # 4. Reorder heads to match original architecture
+            final_attn = combined_attn[:, original_order, :, :]
+            final_attn_sum = combined_attn_sum[:, original_order, :, :]
 
-        # 4. Reorder heads to match original architecture
-        final_attn = combined_attn[:, original_order, :, :]
-        past_key_value.decode_q.append(final_attn)
-        attn_output = torch.matmul(final_attn, value_states)
-
+            past_key_value.decode_q.append((final_attn,final_attn_sum))
+            attn_output = torch.matmul(final_attn, unselected_values)
+        else:
+            past_key_value.decode_q.append((attn_weights,sum_exp_attn_weights))
+            attn_output = torch.matmul(attn_weights, unselected_values)
+            final_attn = attn_weights
+            final_attn_sum = sum_exp_attn_weights
         # query_states[:, :, hj,:].copy_(past_key_value.decode_q[i][:, :, hi,:])
         if len(past_key_value.decode_q) == 32:
             past_key_value.decode_q.clear()
 
+        dropout_rate = self.attention_dropout if self.training else 0.0
+        
+        attn_output_proximal, sum_exp_proximal = _flash_attention_forward(
+        self, query_states.transpose(1, 2), selected_keys.transpose(1, 2), selected_values.transpose(1, 2), attention_mask, q_len, dropout=dropout_rate, return_attn_probs = True)
+
+        attn_output = attn_output.transpose(1, 2)
+        sum_exp_distal = final_attn_sum
+
         # print(sum_exp_distal.shape)
         dtype = torch.get_autocast_gpu_dtype()
         sum_exp_distal = sum_exp_distal.to(dtype)
-        sum_exp_proximal = sum_exp_proximal.to(dtype)
+        sum_exp_proximal = sum_exp_proximal.to(dtype).unsqueeze(-1)
         gate = 1 / (
             torch.exp(sum_exp_distal - sum_exp_proximal) + 1
         )
@@ -824,7 +839,7 @@ def llama_flash_attn2_forward_MiniCache(
 
         gate = torch.nan_to_num(gate, 0.9)
         
-        gate = gate.transpose(1, 2).unsqueeze(-1)
+        gate = gate.transpose(1, 2)
         # print(attn_output.shape,attn_output_proximal.shape,gate.shape)
         attn_output =  attn_output + gate * (attn_output_proximal - attn_output)
         
