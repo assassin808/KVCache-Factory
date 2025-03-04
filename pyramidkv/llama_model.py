@@ -756,12 +756,10 @@ def llama_flash_attn2_forward_MiniCache(
             raw_proximal_scores.amax(dim=-1, keepdim=True)
         )
         
-        sum_exp_distal = torch.logsumexp(raw_attn_scores - max_score, dim=-1, keepdim=True)
-        sum_exp_proximal = torch.logsumexp(raw_proximal_scores - max_score, dim=-1, keepdim=True)
-        gate = torch.exp(sum_exp_proximal - max_score) / (
-            torch.exp(sum_exp_distal - max_score) + 
-            torch.exp(sum_exp_proximal - max_score) + 
-            1e-8
+        sum_exp_distal = torch.logsumexp(raw_attn_scores - max_score, dim=-1, keepdim=True) 
+        sum_exp_proximal = torch.logsumexp(raw_proximal_scores - max_score, dim=-1, keepdim=True) 
+        gate = 1 / (
+            torch.exp(sum_exp_distal - sum_exp_proximal) + 1
         )
         gate = torch.nan_to_num(gate, 0.9)
 
