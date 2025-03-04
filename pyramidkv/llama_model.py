@@ -739,14 +739,14 @@ def llama_flash_attn2_forward_MiniCache(
         else:
             self.kv_seq_len += q_len
             key_states, value_states = past_key_value.update_miniCache_decode(key_states, value_states, self.layer_idx, self.config.num_hidden_layers, cache_kwargs)
-            query_states = query_states.transpose(1, 2)
-            query_states_old = query_states.clone()
-            past_key_value.decode_q.append(query_states_old)
-            # print(past_key_value.decode_q)
-            layer_idx = len(past_key_value.decode_q)-1
-            temp = past_key_value.layer_map[layer_idx]
-            for hj,(i,hi) in temp.items():
-                query_states[:, :, hj,:].copy_(past_key_value.decode_q[i][:, :, hi,:])
+            # query_states = query_states.transpose(1, 2)
+            # query_states_old = query_states.clone()
+            # past_key_value.decode_q.append(query_states_old)
+            # # print(past_key_value.decode_q)
+            # layer_idx = len(past_key_value.decode_q)-1
+            # temp = past_key_value.layer_map[layer_idx]
+            # for hj,(i,hi) in temp.items():
+            #     query_states[:, :, hj,:].copy_(past_key_value.decode_q[i][:, :, hi,:])
             if len(past_key_value.decode_q) == 32:
                 past_key_value.decode_q.clear()
         past_key_value._seen_tokens=self.kv_seq_len
@@ -766,6 +766,52 @@ def llama_flash_attn2_forward_MiniCache(
 
         attn_output, sum_exp_distal = _flash_attention_forward(
         self, query_states, unselected_keys.transpose(1, 2), unselected_values.transpose(1, 2), attention_mask, q_len, dropout=dropout_rate, return_attn_probs = True)
+
+        # print(past_key_value.decode_q)
+        layer_idx = len(past_key_value.decode_q)-1
+        temp = past_key_value.layer_map[layer_idx]
+        hj_selected = []
+        for hj,(i,hi) in temp.items():
+            hj_selected.append(hj)
+ 
+        hj_unselected = [i for i in range(32) if i not in hj_selected]
+        attn_weights = torch.matmul(query_states[:,hj_unselected,:,:], unselected_keys[:,hj_unselected,:,:].transpose(2, 3)) / math.sqrt(self.head_dim)
+
+
+        sum_exp_attn_weights = torch.sum(torch.exp(attn_weights), dim=-1, keepdim=True)
+        # print(query_states.sum().isnan(),key_states[:,:,128:self.prefill_len-128,:].sum().isnan())
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+      
+        
+
+        # 1. Retrieve cached attention for selected heads
+        past_attn = torch.stack(
+            [past_key_value.attn[i][hi] for hj,(i,hi) in temp.items()], 
+            dim=1  # Stack along head dimension
+        )
+
+        # 2. Concatenate current & cached attention (temporary order)
+        combined_attn = torch.cat([
+            attn_weights,  # Current unselected heads (hi_unselected order)
+            past_attn      # Cached selected heads (hi_list order)
+        ], dim=1)
+
+        # 3. Create index mapping for original head order
+        all_heads = hj_unselected + hj_selected  # Temporary concatenated order
+        original_order = sorted(
+            range(len(all_heads)),
+            key=lambda k: all_heads[k]  # Sort by original head index
+        )
+
+        # 4. Reorder heads to match original architecture
+        final_attn = combined_attn[:, original_order, :, :]
+        past_key_value.decode_q.append(final_attn)
+        attn_output = torch.matmul(final_attn, value_states)
+
+        # query_states[:, :, hj,:].copy_(past_key_value.decode_q[i][:, :, hi,:])
+        if len(past_key_value.decode_q) == 32:
+            past_key_value.decode_q.clear()
 
         # print(sum_exp_distal.shape)
         dtype = torch.get_autocast_gpu_dtype()
