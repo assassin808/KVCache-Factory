@@ -91,7 +91,7 @@ def _flash_attention_forward(
         attn_output = pad_input(attn_output_unpad, indices_q, batch_size, query_length)
     else:
         if return_attn_probs:
-            attn_output, log_attn_weight = flash_attn_func(
+            attn_output, log_attn_weight, _ = flash_attn_func(
             query_states, key_states, value_states, dropout, softmax_scale=softmax_scale, causal=causal, return_attn_probs = return_attn_probs)
         else:
             attn_output = flash_attn_func(
@@ -742,6 +742,7 @@ def llama_flash_attn2_forward_MiniCache(
         else:
             self.kv_seq_len += q_len
             key_states, value_states = past_key_value.update_miniCache_decode(key_states, value_states, self.layer_idx, self.config.num_hidden_layers, cache_kwargs)
+            query_states = query_states.transpose(1, 2)
             query_states_old = query_states.clone()
             past_key_value.decode_q.append(query_states_old)
             # print(past_key_value.decode_q)
@@ -750,7 +751,7 @@ def llama_flash_attn2_forward_MiniCache(
                 layer_idx = len(past_key_value.decode_q)-1
                 if (layer_idx, hj) in past_key_value.layer_map:
                     i,hi = past_key_value.layer_map[(layer_idx, hj)]
-                    query_states[:,hj,:,:] = past_key_value.decode_q[i][:,hi,:,:]
+                    query_states[:, :, hj,:] = past_key_value.decode_q[i][:, :, hi,:]
             # for item in past_key_value.layer_map:
             #     # print(item, len(past_key_value.decode_q)-1)
             #     if len(past_key_value.decode_q)-1 == item[1]:
@@ -769,8 +770,7 @@ def llama_flash_attn2_forward_MiniCache(
         unselected_keys = past_key_value.key_unit_cache[self.layer_idx]
         unselected_values = past_key_value.value_unit_cache[self.layer_idx]
 
-        query_states = query_states.transpose(1, 2)
-        query_states_old = query_states_old.transpose(1, 2)
+    
         dropout_rate = self.attention_dropout if self.training else 0.0
 
         attn_output_proximal, sum_exp_proximal = _flash_attention_forward(
@@ -778,15 +778,19 @@ def llama_flash_attn2_forward_MiniCache(
 
         attn_output, sum_exp_distal = _flash_attention_forward(
         self, query_states, unselected_keys.transpose(1, 2), unselected_values.transpose(1, 2), attention_mask, q_len, dropout=dropout_rate, return_attn_probs = True)
-
+        # print(sum_exp_distal.shape)
+        dtype = torch.get_autocast_gpu_dtype()
+        sum_exp_distal = sum_exp_distal.to(dtype)
+        sum_exp_proximal = sum_exp_proximal.to(dtype)
         gate = 1 / (
             torch.exp(sum_exp_distal - sum_exp_proximal) + 1
         )
         gate = torch.nan_to_num(gate, 0.9)
-
-        gate = gate.transpose(1, 2)
+        
+        gate = gate.transpose(1, 2).unsqueeze(-1)
         # print(attn_output.shape,attn_output_proximal.shape,gate.shape)
         attn_output =  (1 - gate) * attn_output + gate * attn_output_proximal
+       
         
     else:
         query_states = query_states.transpose(1, 2)
