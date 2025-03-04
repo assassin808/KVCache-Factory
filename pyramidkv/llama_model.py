@@ -747,7 +747,7 @@ def llama_flash_attn2_forward_MiniCache(
             past_key_value.decode_q.append(query_states_old)
             # print(past_key_value.decode_q)
 
-            for hj in range(query_states_old.shape[1]):
+            for hj in range(query_states_old.shape[2]):
                 layer_idx = len(past_key_value.decode_q)-1
                 if (layer_idx, hj) in past_key_value.layer_map:
                     i,hi = past_key_value.layer_map[(layer_idx, hj)]
