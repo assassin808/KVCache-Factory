@@ -322,7 +322,7 @@ class DynamicCache(Cache):
             mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
             mask = mask.to(key_states.device)
             attention_mask = mask[None, None, :, :]
-            scaled_size = min(296, self.retained_key_cache[0].shape[2])
+            scaled_size = min(285, self.retained_key_cache[0].shape[2])
 
         if False:
             self.indices.append(None)
@@ -443,6 +443,7 @@ class DynamicCache(Cache):
                         layer_map[-1][i] = int(layer_map[-1][i])
                     layer_map[-1][5] = float(layer_map[-1][5])
                     layer_map[-1][6] = float(layer_map[-1][6])
+
             for i in range(32):
                 prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
                 prev_segment[:, :, -window_size:, -window_size:] += attention_mask
@@ -485,7 +486,7 @@ class DynamicCache(Cache):
 
                 attn_diff[i] = F.max_pool1d(attn_diff[i], kernel_size = 7, padding=7//2, stride=1)
                 selected_attn_diff =torch.gather(attn_diff[i], dim=-1, index=all_indices)
-                indices = selected_attn_diff.topk((int(scaled_size*0.6) - window_size - sink_size), dim=-1).indices
+                indices = selected_attn_diff.topk((int(scaled_size*0.7) - window_size - sink_size), dim=-1).indices
                 indices = torch.gather(all_indices, dim=-1, index=indices)
 
                 final_indices_expanded = indices.unsqueeze(-1)  # Shape: [batch, heads, k_final, 1]
@@ -553,7 +554,6 @@ class DynamicCache(Cache):
                 # self.retained_key_cache[j][:, :, -8:, :] = temp_key[j][:, :, -8:, :]
                 # self.retained_key_cache[j][:, :, :8, :] = temp_key[j][:, :, :8, :]
                 # self.retained_value_cache[j][:, :, -8:, :] = temp_value[i][:, :, -8:, :]
-
         if layer_idx == 31:
             device = self.retained_key_cache[0].device
             # Convert lists to tensors (example shapes)
@@ -599,16 +599,21 @@ class DynamicCache(Cache):
                 self.indices[i] = None
             # item in self.layer_map is (i, j, seg, hi, hj, sim, scaling)
             # now we cast layer map to a dict with (j,hj) as key and (i,hi) as value.
+            # Convert layer_map to a nested dictionary for per-layer storage
             layer_map = {}
+            for _ in range(32):
+                layer_map[_]={}
             for item in self.layer_map:
                 i, j, seg, hi, hj, _, s = item
-                layer_map[(j, hj)] = (i, hi)
+                if j not in layer_map:
+                    layer_map[j] = {}  # Create a new dict for layer j
+                layer_map[j][hj] = (i, hi)  # Store mapping per head
+
             self.layer_map = layer_map
             
             # delete all temporary variables only keep the final key and value caches
             del temp_key, retained_keys, retained_values, layer_indices_full, layer_indices_compress, combined_range, all_indices, index_expanded, compress_index_expanded, selected_keys, selected_values, unselected_keys, unselected_values, self.query_cache
             torch.cuda.empty_cache()
-
 
         # layer_map.sort(key=lambda x:-x[-2])#from high to low
 

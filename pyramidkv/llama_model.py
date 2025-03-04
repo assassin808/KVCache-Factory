@@ -572,13 +572,10 @@ def llama_attn_forward_MiniCache(
             query_states_old = query_states.clone()
             past_key_value.decode_q.append(query_states_old)
             # print(past_key_value.decode_q)
-            for item in past_key_value.layer_map:
-                # print(item, len(past_key_value.decode_q)-1)
-                if len(past_key_value.decode_q)-1 == item[1]:
-                    # print(query_states.shape)
-                    # print(past_key_value.decode_q[item[0]][:,item[3],:,:].sum().isnan())
-                    query_states[:,item[4],:,:] = past_key_value.decode_q[item[0]][:,item[3],:,:]
-                    # print(item[-1])
+            layer_idx = len(past_key_value.decode_q)-1
+            temp = past_key_value.layer_map[layer_idx]
+            for hj,(i,hi) in temp.items():
+                query_states[:, hj, :,:].copy_(past_key_value.decode_q[i][:, hi, :,:])
             if len(past_key_value.decode_q) == 32:
                 past_key_value.decode_q.clear()
         past_key_value._seen_tokens=self.kv_seq_len
@@ -746,19 +743,10 @@ def llama_flash_attn2_forward_MiniCache(
             query_states_old = query_states.clone()
             past_key_value.decode_q.append(query_states_old)
             # print(past_key_value.decode_q)
-
-            for hj in range(query_states_old.shape[2]):
-                layer_idx = len(past_key_value.decode_q)-1
-                if (layer_idx, hj) in past_key_value.layer_map:
-                    i,hi = past_key_value.layer_map[(layer_idx, hj)]
-                    query_states[:, :, hj,:] = past_key_value.decode_q[i][:, :, hi,:]
-            # for item in past_key_value.layer_map:
-            #     # print(item, len(past_key_value.decode_q)-1)
-            #     if len(past_key_value.decode_q)-1 == item[1]:
-            #         # print(query_states.shape)
-            #         # print(past_key_value.decode_q[item[0]][:,item[3],:,:].sum().isnan())
-            #         query_states[:,item[4],:,:] = past_key_value.decode_q[item[0]][:,item[3],:,:]
-            #         # print(item[-1])
+            layer_idx = len(past_key_value.decode_q)-1
+            temp = past_key_value.layer_map[layer_idx]
+            for hj,(i,hi) in temp.items():
+                query_states[:, :, hj,:].copy_(past_key_value.decode_q[i][:, :, hi,:])
             if len(past_key_value.decode_q) == 32:
                 past_key_value.decode_q.clear()
         past_key_value._seen_tokens=self.kv_seq_len
@@ -772,12 +760,13 @@ def llama_flash_attn2_forward_MiniCache(
 
     
         dropout_rate = self.attention_dropout if self.training else 0.0
-
+        
         attn_output_proximal, sum_exp_proximal = _flash_attention_forward(
         self, query_states_old, selected_keys.transpose(1, 2), selected_values.transpose(1, 2), attention_mask, q_len, dropout=dropout_rate, return_attn_probs = True)
 
         attn_output, sum_exp_distal = _flash_attention_forward(
         self, query_states, unselected_keys.transpose(1, 2), unselected_values.transpose(1, 2), attention_mask, q_len, dropout=dropout_rate, return_attn_probs = True)
+
         # print(sum_exp_distal.shape)
         dtype = torch.get_autocast_gpu_dtype()
         sum_exp_distal = sum_exp_distal.to(dtype)
@@ -785,11 +774,14 @@ def llama_flash_attn2_forward_MiniCache(
         gate = 1 / (
             torch.exp(sum_exp_distal - sum_exp_proximal) + 1
         )
+
+
         gate = torch.nan_to_num(gate, 0.9)
         
         gate = gate.transpose(1, 2).unsqueeze(-1)
         # print(attn_output.shape,attn_output_proximal.shape,gate.shape)
-        attn_output =  (1 - gate) * attn_output + gate * attn_output_proximal
+        attn_output =  attn_output + gate * (attn_output_proximal - attn_output)
+        
        
         
     else:
