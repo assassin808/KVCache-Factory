@@ -600,6 +600,14 @@ class DynamicCache(Cache):
             # print('complete')
             for i in range(32):
                 self.indices[i] = None
+            # item in self.layer_map is (i, j, seg, hi, hj, sim, scaling)
+            # now we cast layer map to a dict with (j,hj) as key and (i,hi) as value.
+            layer_map = {}
+            for item in self.layer_map:
+                i, j, seg, hi, hj, _, s = item
+                layer_map[(j, hj)] = (i, hi)
+            self.layer_map = layer_map
+            
             # delete all temporary variables only keep the final key and value caches
             del temp_key, retained_keys, retained_values, layer_indices_full, layer_indices_compress, combined_range, all_indices, index_expanded, compress_index_expanded, selected_keys, selected_values, unselected_keys, unselected_values, self.query_cache
             torch.cuda.empty_cache()
