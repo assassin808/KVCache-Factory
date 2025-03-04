@@ -526,8 +526,8 @@ class DynamicCache(Cache):
             j_tensor = torch.tensor(j_list, device=self.retained_key_cache[0].device)
             hi_tensor = torch.tensor(hi_list, device=self.retained_key_cache[0].device)
             hj_tensor = torch.tensor(hj_list, device=self.retained_key_cache[0].device)
-            lis_tensor = torch.stack(lis_list)  # Shape: [num_items, M]
-            _lis_tensor = torch.stack(_lis_list)  # Shape: [num_items, M]
+            lis_tensor = torch.tensor(lis_list, device=self.retained_key_cache[0].device)  # Shape: [num_items, M]
+            _lis_tensor = torch.tensor(_lis_list, device=self.retained_key_cache[0].device)  # Shape: [num_items, M]
 
             # Perform batched updates
             # Inside the batched updates loop where layer_map is processed
@@ -556,47 +556,41 @@ class DynamicCache(Cache):
                 # self.retained_value_cache[j][:, :, -8:, :] = temp_value[i][:, :, -8:, :]
         if layer_idx == 31:
             device = self.retained_key_cache[0].device
-            # Convert lists to tensors (example shapes)
-            retained_keys = torch.stack(self.retained_key_cache)  # Shape: [32, 1, H, N, D]
-            retained_values = torch.stack(self.retained_value_cache)
-            layer_indices_full = torch.stack([i[1] for i in self.indices])  # Shape: [32, 1, H, M]
-            layer_indices_compress = torch.stack([i[0] for i in self.indices])
-
-            # Precompute combined_range for all layers
-            seq_len = retained_keys.shape[-2]
-            combined_range = torch.cat([
-                torch.arange(0, sink_size, device=device),
-                torch.arange(seq_len - window_size, seq_len, device=device)
-            ])
-            combined_range = combined_range.view(1, 1, 1, -1).expand(32, 1, layer_indices_full.size(2), -1)
-
-            # Concatenate indices and gather
-            all_indices = torch.cat([layer_indices_full, combined_range], dim=-1)
-            index_expanded = all_indices.unsqueeze(-1).expand(-1, -1, -1, -1, retained_keys.size(-1))
-            compress_index_expanded = layer_indices_compress.unsqueeze(-1).expand(-1, -1, -1, -1, retained_keys.size(-1))
-            selected_keys = torch.gather(retained_keys, 3, index_expanded)
-            selected_values = torch.gather(retained_values, 3, index_expanded)
-            unselected_keys = torch.gather(retained_keys, 3, compress_index_expanded)
-            unselected_values = torch.gather(retained_values, 3, compress_index_expanded)
-
-            # Create mask and unselected entries
-            # mask = torch.ones((32, 1, layer_indices.size(2), seq_len), dtype=torch.bool, device=device)
-            # mask.scatter_(3, all_indices, False)
-            # unselected_keys = retained_keys[mask].view(32, 1, layer_indices.size(2), -1, retained_keys.size(-1))
-            # unselected_values = retained_values[mask].view(32, 1, layer_indices.size(2), -1, retained_values.size(-1))
-
-
-            # Update caches in-place
+            
+            # Process each layer individually
             for j in range(32):
-                self.key_unit_cache[j] = unselected_keys[j]
-                # print(unselected_keys[j].shape)
-                self.value_unit_cache[j] = unselected_values[j]
-                self.retained_key_cache[j] = selected_keys[j]
-                # print(selected_keys[j].shape)
-                self.retained_value_cache[j] = selected_values[j]
-            # print('complete')
-            for i in range(32):
-                self.indices[i] = None
+                # Get sequence length for this layer
+                seq_len = self.retained_key_cache[j].shape[-2]
+                
+                # Create combined indices for this layer
+                window_start = seq_len - window_size
+                window_indices = torch.arange(window_start, seq_len, device=device)
+                combined_indices = torch.cat([sink_indices, window_indices])
+                
+                # Get layer-specific indices
+                layer_indices_full = self.indices[j][1]  # [1, H, M]
+                layer_indices_compress = self.indices[j][0]  # [1, H, M_compress]
+                
+                # Combine with sink/window indices
+                combined_expanded = combined_indices.view(1, 1, -1).expand(1, layer_indices_full.size(1), -1)
+                all_indices = torch.cat([layer_indices_full, combined_expanded], dim=-1)
+                
+                # Gather indices
+                index_expanded = all_indices.unsqueeze(-1).expand(-1, -1, -1, self.retained_key_cache[j].size(-1))
+                selected_keys = torch.gather(self.retained_key_cache[j], 2, index_expanded)
+                selected_values = torch.gather(self.retained_value_cache[j], 2, index_expanded)
+                
+                # Gather compressed indices
+                compress_index_expanded = layer_indices_compress.unsqueeze(-1).expand(-1, -1, -1, self.retained_key_cache[j].size(-1))
+                unselected_keys = torch.gather(self.retained_key_cache[j], 2, compress_index_expanded)
+                unselected_values = torch.gather(self.retained_value_cache[j], 2, compress_index_expanded)
+                
+                # Update caches for this layer
+                self.key_unit_cache[j] = unselected_keys
+                self.value_unit_cache[j] = unselected_values
+                self.retained_key_cache[j] = selected_keys
+                self.retained_value_cache[j] = selected_values
+                self.indices[j] = None
             # item in self.layer_map is (i, j, seg, hi, hj, sim, scaling)
             # now we cast layer map to a dict with (j,hj) as key and (i,hi) as value.
             # Convert layer_map to a nested dictionary for per-layer storage
@@ -612,7 +606,7 @@ class DynamicCache(Cache):
             self.layer_map = layer_map
             
             # delete all temporary variables only keep the final key and value caches
-            del temp_key, retained_keys, retained_values, layer_indices_full, layer_indices_compress, combined_range, all_indices, index_expanded, compress_index_expanded, selected_keys, selected_values, unselected_keys, unselected_values, self.query_cache
+            del temp_key, self.query_cache
             torch.cuda.empty_cache()
 
         # layer_map.sort(key=lambda x:-x[-2])#from high to low
