@@ -765,33 +765,22 @@ def llama_flash_attn2_forward_MiniCache(
         unselected_keys = past_key_value.key_unit_cache[self.layer_idx]
         unselected_values = past_key_value.value_unit_cache[self.layer_idx]
 
-        scale = 1 / math.sqrt(self.head_dim)
-        raw_attn_scores = torch.matmul(query_states, unselected_keys.transpose(2, 3)) * scale
-        raw_proximal_scores = torch.matmul(query_states_old, selected_keys.transpose(2, 3)) * scale
-        max_score = torch.maximum(
-            raw_attn_scores.amax(dim=-1, keepdim=True),
-            raw_proximal_scores.amax(dim=-1, keepdim=True)
-        )
-        
-        sum_exp_distal = torch.logsumexp(raw_attn_scores - max_score, dim=-1, keepdim=True) 
-        sum_exp_proximal = torch.logsumexp(raw_proximal_scores - max_score, dim=-1, keepdim=True) 
+        query_states = query_states.transpose(1, 2)
+        query_states_old = query_states_old.transpose(1, 2)
+        dropout_rate = self.attention_dropout if self.training else 0.0
+
+        attn_output_proximal, sum_exp_proximal = _flash_attention_forward(
+        self, query_states_old, selected_keys.transpose(1, 2), selected_values.transpose(1, 2), attention_mask, q_len, dropout=dropout_rate, return_attn_probs = True)
+
+        attn_output, sum_exp_distal = _flash_attention_forward(
+        self, query_states, unselected_keys.transpose(1, 2), unselected_values.transpose(1, 2), attention_mask, q_len, dropout=dropout_rate, return_attn_probs = True)
+
         gate = 1 / (
             torch.exp(sum_exp_distal - sum_exp_proximal) + 1
         )
         gate = torch.nan_to_num(gate, 0.9)
 
         gate = gate.transpose(1, 2)
-
-        query_states = query_states.transpose(1, 2)
-        query_states_old = query_states_old.transpose(1, 2)
-        dropout_rate = self.attention_dropout if self.training else 0.0
-
-
-        attn_output_proximal = _flash_attention_forward(
-        self, query_states_old, selected_keys.transpose(1, 2), selected_values.transpose(1, 2), attention_mask, q_len, dropout=dropout_rate)
-
-        attn_output = _flash_attention_forward(
-        self, query_states, unselected_keys.transpose(1, 2), unselected_values.transpose(1, 2), attention_mask, q_len, dropout=dropout_rate)
         # print(attn_output.shape,attn_output_proximal.shape,gate.shape)
         attn_output =  (1 - gate) * attn_output + gate * attn_output_proximal
         
