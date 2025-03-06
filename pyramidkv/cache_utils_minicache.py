@@ -276,6 +276,7 @@ class DynamicCache(Cache):
         hidden_states: torch.Tensor = None, 
         query_states: torch.Tensor = None, 
         attention_mask = None,
+        max_len = 256,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
@@ -322,8 +323,10 @@ class DynamicCache(Cache):
             mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
             mask = mask.to(key_states.device)
             attention_mask = mask[None, None, :, :]
-            scaled_size = min(285, self.retained_key_cache[0].shape[2])
-            ratio = 0.7
+            def f(a,n=256):
+                    return int(n/(10/32+22/32*(a+1)/2))
+            ratio = 0.6
+            scaled_size = min(f(ratio,max_len),self.retained_key_cache[0].shape[2])
 
         if False:
             self.indices.append(None)
@@ -456,17 +459,18 @@ class DynamicCache(Cache):
                 )
             for i in range(32):
                 attn_diff[i] = None
-                min_num = (256-16)//2
-                max_num = 2*(256-16) - min_num
+                # min_num = (256-16)//2
+                # max_num = 2*(256-16) - min_num
 
-                steps = (max_num - min_num) / 31
-                max_capacity_prompt = int(max_num - steps * i)
-                scaled_size = max_capacity_prompt + 16
-                ratio = 0.2 + (0.8-0.2)/31*i
-                def f(a,n=256):
-                    return int(n/(10/32+22/32*(a+1)/2))
-                def g(y,n=256):
-                    return (n/y-10/32)*2*32/22-1
+                # steps = (max_num - min_num) / 31
+                # max_capacity_prompt = int(max_num - steps * i)
+                # scaled_size = max_capacity_prompt + 16
+                # scaled_size = 256
+                # ratio = 0.6
+                
+                
+                # def g(y,n=256):
+                #     return (n/y-10/32)*2*32/22-1
                 # prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
                 # # p = prev_segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
                 # # p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D]
@@ -475,7 +479,7 @@ class DynamicCache(Cache):
                 # attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(self.retained_key_cache[i].dtype)
                 # attn_weights_sum_prev = attn_weights[:, :, -window_size:, sink_size:-window_size ].sum(dim = -2)
                 attn_weights_sum_prev = attn_lis[i]
-                all_indices = (F.max_pool1d(attn_weights_sum_prev, kernel_size = 7, padding=7//2, stride=1)).topk((f(ratio,scaled_size)-window_size-sink_size), dim=-1).indices #[1,h,10]
+                all_indices = (F.max_pool1d(attn_weights_sum_prev, kernel_size = 7, padding=7//2, stride=1)).topk((scaled_size-window_size-sink_size), dim=-1).indices #[1,h,10]
                 counter = 0
                 for j in range(32):
                     if abs(i-j)>5:
@@ -502,7 +506,7 @@ class DynamicCache(Cache):
 
                 attn_diff[i] = F.max_pool1d(attn_diff[i], kernel_size = 7, padding=7//2, stride=1)
                 selected_attn_diff =torch.gather(attn_diff[i], dim=-1, index=all_indices)
-                indices = selected_attn_diff.topk((int(f(ratio,scaled_size)*ratio) - window_size - sink_size), dim=-1).indices
+                indices = selected_attn_diff.topk((int(scaled_size*ratio) - window_size - sink_size), dim=-1).indices
                 indices = torch.gather(all_indices, dim=-1, index=indices)
 
                 final_indices_expanded = indices.unsqueeze(-1)  # Shape: [batch, heads, k_final, 1]
