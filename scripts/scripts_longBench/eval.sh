@@ -1,10 +1,10 @@
 # export CUDA_VISIBLE_DEVICES=$1
-
-method="SnapKV" # Support PyramidKV, SnapKV, H2O, StreamingLLM, CAM, L2Norm, ThinK
+method="minicache" # Support PyramidKV, SnapKV, H2O, StreamingLLM, CAM, L2Norm, ThinK
 max_capacity_prompts=$1 # 128,2048 in paper
 attn_implementation="flash_attention_2" # Support "flash_attention_2", "sdpa", "eager".
 source_path="./"
 model_path="/root/autodl-tmp/mistral-v0.2-instruct/"
+model_path="/root/autodl-tmp/models--meta-llama--Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659"
 # merge_method=$7 # Support "pivot"(LOOK-M_PivotMerge).
 # quant_method=$7 # Support kivi and kvquant, default None.
 # nbits=$8 # Quantization bit-width support 8,4,2. Need to set quant_method first.

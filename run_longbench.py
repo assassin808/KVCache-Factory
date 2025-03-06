@@ -9,10 +9,9 @@ from tqdm import tqdm
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-datasets = ["narrativeqa", "qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "musique", \
+datasets = [ "narrativeqa","qasper", "multifieldqa_en",  "hotpotqa", "2wikimqa", "musique", \
             "gov_report", "qmsum", "multi_news", "trec", "triviaqa", "samsum", \
             "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
-
 dataset2maxlen = {
     "narrativeqa": 128,
     "qasper": 128,
@@ -217,7 +216,7 @@ def main(args):
         
         
         if args.method != "FullKV":
-            if args.method.lower() in ["snapkv","pyramidkv","h2o","cam", "l2norm", "adakv", "headkv", "think"]:
+            if args.method.lower() in ["snapkv","pyramidkv","h2o","cam", "l2norm", "adakv", "headkv", "think", "minicache"]:
                 window_sizes = 8
             elif args.method.lower() in ["streamingllm", 'grouphead']:
                 window_sizes = max_capacity_prompts - 4
