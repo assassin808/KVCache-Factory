@@ -677,7 +677,7 @@ def llama_flash_attn2_forward_MiniCache(
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
     # [SnapKV] register kv_cluster
-    # init_snapkv(self)
+    init_snapkv(self)
     # LlamaFlashAttention2 attention does not support output_attentions
     if "padding_mask" in kwargs:
         warnings.warn(
@@ -735,7 +735,7 @@ def llama_flash_attn2_forward_MiniCache(
         if key_states.shape[-2] == kv_seq_len: # [SnapKV] add kv_cluster
             self.kv_seq_len = kv_seq_len # [SnapKV] register kv_seq_len
             self.prefill_len = kv_seq_len
-            _, _, _ = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs, hidden_states, query_states, attention_mask)
+            _, _, _ = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs, hidden_states, query_states, attention_mask, self.kv_cluster.max_capacity_prompt)
         else:
             self.kv_seq_len += q_len
             key_states, value_states = past_key_value.update_miniCache_decode(key_states, value_states, self.layer_idx, self.config.num_hidden_layers, cache_kwargs)
