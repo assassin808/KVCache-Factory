@@ -215,7 +215,7 @@ class HopcroftKarp:
                 if pair_U[u] is None:
                     if self.dfs(u, pair_U, pair_V, dist):
                         result += 1
-        return result
+        return pair_U,result
 
     def bfs(self, pair_U, pair_V, dist):
         queue = deque()
@@ -248,7 +248,7 @@ class HopcroftKarp:
             return False
         return True
 
-def is_feasible(filtered_pairs, required_size=23*32):
+def is_feasible(filtered_pairs, required_size=22*32):
     # Build bipartite graph
     left_nodes = set()
     right_nodes = set()
@@ -264,7 +264,7 @@ def is_feasible(filtered_pairs, required_size=23*32):
 
     # Perform Hopcroft-Karp algorithm
     hk = HopcroftKarp(graph, left_nodes, right_nodes)
-    max_match = hk.max_matching()
+    max_match = hk.max_matching()[1]
 
     return max_match >= required_size
 
@@ -358,35 +358,48 @@ class DynamicCache(Cache):
         self.retained_value_cache.append(value_states)
         self.hidden_states.append(None)
         self.query_cache.append(query_states)
-
+        window_size = 8
         if layer_idx == 31:
             all_pairs = []
-            num_segments = 1
-            segment_size = self.retained_key_cache[0].shape[2] // num_segments
-
-            # Precompute all possible pairs
             for i in range(32):
+                print(i)
+                prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                p = prev_segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
+                p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D
                 for j in range(32):
-                    if i >= j:
+                    if i > j:
                         continue
 
-                    # Compute attention matrices for layers i and j
-                    prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                    p = prev_segment[:, :, -1024//2:, list(range(0,self.retained_key_cache[0].shape[2],4))][0]  # [num_heads, seq_len, dim]
-                    
-                    segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                    s = segment[:, :, -1024//2:, list(range(0,self.retained_key_cache[0].shape[2],4))][0]  # [num_heads, seq_len, dim]
+                    # Get query-key pairs for both layers 
+                    segment = torch.matmul(self.query_cache[j][:,:,-window_size:,:], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                    s = segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
+                    s_expanded = s.unsqueeze(0)  # [H_i, 1, S, D
 
-                    # Compute similarity for all head pairs
-                    for head_i in range(p.shape[0]):
-                        for head_j in range(s.shape[0]):
+                    cosine_sim = F.cosine_similarity(p_expanded, s_expanded, dim=-1)
+                    cosine_sim_avg = cosine_sim.mean(dim=-1)  # [H_i, H_j]
+                    # Find best matches for each head in layer i
+
+                    for head_i in range(32):
+                        for head_j in range(32):
+                            sim = cosine_sim_avg[head_i][head_j].item()
+
+
+                            # Calculate norm scaling for matched heads
                             p_head = p[head_i]
                             s_head = s[head_j]
                             p_norm = p_head.norm(dim=-1).mean().item()
                             s_norm = s_head.norm(dim=-1).mean().item()
                             scaling = s_norm / p_norm if p_norm != 0 else 0.0
-                            cosine_sim = F.cosine_similarity(p_head.unsqueeze(0), s_head.unsqueeze(1), dim=-1).mean().item()
-                            all_pairs.append( (i, j, 0, head_i, head_j, cosine_sim, scaling) )
+
+                            # Store matched pair information
+                            if sim < 0.9:
+                                continue
+                            # import random
+                            # sim = random.random()
+                            # scaling=1
+                            if i==j and head_i==head_j:
+                                continue
+                            all_pairs.append((i, j, 0, head_i, head_j, sim, scaling))
 
             # Binary search for maximum minimal similarity
             all_pairs_sorted = sorted(all_pairs, key=lambda x: x[5])  # Sort by similarity
@@ -423,12 +436,12 @@ class DynamicCache(Cache):
                 right_nodes.add(v)
 
             hk = HopcroftKarp(graph, left_nodes, right_nodes)
-            pair_U = hk.max_matching()
+            pair_U = hk.max_matching()[0]
 
             # Update the cache based on the maximum matching
             replaced_segment = set()
             for u in left_nodes:
-                if pair_U[u] is not None and len(replaced_segment) < 23*32:
+                if pair_U[u] is not None and len(replaced_segment) < 22*32:
                     i, seg, hi = u
                     j, _, hj = pair_U[u]
                     replaced_segment.add( (j, seg, hj) )
@@ -443,6 +456,11 @@ class DynamicCache(Cache):
         self.value_magnitude.append(None)
         self.mask_k.append(None)
         self.mask_v.append(None)
+        if layer_idx == 31:
+                with open('layer_map_final.csv', 'w') as f:
+                    for item in self.layer_map:
+                        f.write(','.join([str(i) for i in item]) + '\n')
+                exit(0)
 
         return (self.retained_key_cache[layer_idx].clone(), self.retained_value_cache[layer_idx].clone(), self.hidden_states[layer_idx])
     def update_miniCache(
