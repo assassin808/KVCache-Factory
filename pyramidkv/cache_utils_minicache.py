@@ -305,11 +305,34 @@ class DynamicCache(Cache):
         self.retained_key_cache.append(key_states)
         self.retained_value_cache.append(value_states)
         self.hidden_states.append(None)
-        self.query_cache.append(query_states)
 
-        layer_map = []
         sink_size = 8
-        window_size = 64 // 4 // 2
+        window_size = 8
+        layer_map = []
+        query_states = query_states[:,:,-window_size:,:]
+
+        mask = torch.full((window_size, window_size), torch.finfo(key_states.dtype).min, device=key_states.device)
+        mask_cond = torch.arange(mask.size(-1), device=key_states.device)
+        mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
+        mask = mask.to(key_states.device)
+        attention_mask = mask[None, None, :, :]
+        def f(a,n=256):
+                return int(n/(10/32+22/32*(a+1)/2))
+        ratio = 0.4
+        scaled_size = min(f(ratio,max_len),self.retained_key_cache[0].shape[2])
+        
+
+        attn_lis = []
+        prev_segment = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+        prev_segment[:, :, -window_size:, -window_size:] += attention_mask
+        attn_weights = prev_segment
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(self.retained_key_cache[0].dtype)
+        attn_weights_sum_prev = attn_weights[:, :, -window_size:, sink_size:-window_size ].sum(dim = -2)
+        self.query_cache.append(attn_weights_sum_prev)
+
+        del query_states
+        torch.cuda.empty_cache()
+        
 
         self.key_unit_cache.append(None)
         self.value_unit_cache.append(None)
@@ -317,20 +340,9 @@ class DynamicCache(Cache):
         self.value_magnitude.append(None)
         self.mask_k.append(None)
         self.mask_v.append(None)
-        if layer_idx == 31:
-            mask = torch.full((window_size, window_size), torch.finfo(key_states.dtype).min, device=key_states.device)
-            mask_cond = torch.arange(mask.size(-1), device=key_states.device)
-            mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
-            mask = mask.to(key_states.device)
-            attention_mask = mask[None, None, :, :]
-            def f(a,n=256):
-                    return int(n/(10/32+22/32*(a+1)/2))
-            ratio = 0.6
-            scaled_size = min(f(ratio,max_len),self.retained_key_cache[0].shape[2])
 
         if False:
             self.indices.append(None)
-            ret_value = (self.retained_key_cache[layer_idx].clone(), self.retained_value_cache[layer_idx].clone(), self.hidden_states[layer_idx])
             # if layer_idx == 31:
             #     with open('layer_map_new.csv', 'r') as f:
             #             first_line = f.readline()
@@ -346,7 +358,7 @@ class DynamicCache(Cache):
             if layer_idx == 31:
                 for i in range(32):
                     print(i)
-                    prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                    prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
                     p = prev_segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
                     p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D
                     for j in range(32):
@@ -354,7 +366,7 @@ class DynamicCache(Cache):
                             continue
 
                         # Get query-key pairs for both layers 
-                        segment = torch.matmul(self.query_cache[j][:,:,-window_size:,:], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                        segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
                         s = segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
                         s_expanded = s.unsqueeze(0)  # [H_i, 1, S, D
  
@@ -405,7 +417,7 @@ class DynamicCache(Cache):
                     for item in self.layer_map:
                         f.write(','.join([str(i) for i in item]) + '\n')
                 exit(0)
-            return ret_value[0], ret_value[1], ret_value[2]
+            return self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], None
                 # with open('layer_map.csv', 'r') as f:
                 #     print('read')
                 #     layer_map = []
@@ -437,7 +449,6 @@ class DynamicCache(Cache):
         if layer_idx == 31:
             num_segments = 1
             segment_size = self.retained_key_cache[0].shape[2] // num_segments
-            attn_lis = []
             attn_diff = {}
             with open('layer_map_final.csv', 'r') as f:
                 layer_map = []
@@ -447,37 +458,10 @@ class DynamicCache(Cache):
                         layer_map[-1][i] = int(layer_map[-1][i])
                     layer_map[-1][5] = float(layer_map[-1][5])
                     layer_map[-1][6] = float(layer_map[-1][6])
-
-            for i in range(32):
-                prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                prev_segment[:, :, -window_size:, -window_size:] += attention_mask
-                attn_weights = prev_segment
-                attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(self.retained_key_cache[i].dtype)
-                attn_weights_sum_prev = attn_weights[:, :, -window_size:, sink_size:-window_size ].sum(dim = -2)
-                attn_lis.append(
-                    attn_weights_sum_prev
-                )
+            attn_lis = self.query_cache 
             for i in range(32):
                 attn_diff[i] = None
                 # min_num = (256-16)//2
-                # max_num = 2*(256-16) - min_num
-
-                # steps = (max_num - min_num) / 31
-                # max_capacity_prompt = int(max_num - steps * i)
-                # scaled_size = max_capacity_prompt + 16
-                # scaled_size = 256
-                # ratio = 0.6
-                
-                
-                # def g(y,n=256):
-                #     return (n/y-10/32)*2*32/22-1
-                # prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                # # p = prev_segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
-                # # p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D]
-                # prev_segment[:, :, -window_size:, -window_size:] += attention_mask
-                # attn_weights = prev_segment
-                # attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(self.retained_key_cache[i].dtype)
-                # attn_weights_sum_prev = attn_weights[:, :, -window_size:, sink_size:-window_size ].sum(dim = -2)
                 attn_weights_sum_prev = attn_lis[i]
                 all_indices = (F.max_pool1d(attn_weights_sum_prev, kernel_size = 7, padding=7//2, stride=1)).topk((scaled_size-window_size-sink_size), dim=-1).indices #[1,h,10]
                 counter = 0
@@ -808,3 +792,140 @@ class DynamicCache(Cache):
         for layer_idx in range(len(self)):
             self.key_cache[layer_idx] = self.key_cache[layer_idx][indices, ...]
             self.value_cache[layer_idx] = self.value_cache[layer_idx][indices, ...]
+
+class StaticCache(Cache):
+    """
+    Static Cache class to be used with `torch.compile(model)` and `torch.export()`.
+
+    Parameters:
+        config (`PretrainedConfig`):
+            The configuration file defining the shape-related attributes required to initialize the static cache.
+        max_batch_size (`int`):
+            The maximum batch size with which the model will be used.
+        max_cache_len (`int`):
+            The maximum sequence length with which the model will be used.
+        device (`torch.device`):
+            The device on which the cache should be initialized. Should be the same as the layer.
+        dtype (*optional*, defaults to `torch.float32`):
+            The default `dtype` to use when initializing the layer.
+
+    Example:
+
+        ```python
+        >>> from transformers import AutoTokenizer, AutoModelForCausalLM, StaticCache
+
+        >>> model = AutoModelForCausalLM.from_pretrained("openai-community/gpt2")
+        >>> tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
+
+        >>> inputs = tokenizer(text="My name is GPT2", return_tensors="pt")
+
+        >>> # Prepare a cache class and pass it to model's forward
+        >>> # Leave empty space for 10 new tokens, which can be used when calling forward iteratively 10 times to generate
+        >>> max_generated_length = inputs.input_ids.shape[1] + 10
+        >>> past_key_values = StaticCache(config=model.config, max_batch_size=1, max_cache_len=max_generated_length, device=model.device, dtype=model.dtype)
+        >>> outputs = model(**inputs, past_key_values=past_key_values, use_cache=True)
+        >>> past_kv_length = outputs.past_key_values # access cache filled with key/values from generation
+        ```
+    """
+
+    def __init__(self, config: PretrainedConfig, max_batch_size: int, max_cache_len: int, device, dtype=None) -> None:
+        super().__init__()
+        self.max_batch_size = max_batch_size
+        self.max_cache_len = config.max_position_embeddings if max_cache_len is None else max_cache_len
+        # Some model define a custom `head_dim` != config.hidden_size // config.num_attention_heads
+        self.head_dim = (
+            config.head_dim if hasattr(config, "head_dim") else config.hidden_size // config.num_attention_heads
+        )
+
+        self.dtype = dtype if dtype is not None else torch.float32
+        self.num_key_value_heads = (
+            config.num_attention_heads if config.num_key_value_heads is None else config.num_key_value_heads
+        )
+
+        self.key_cache: List[torch.Tensor] = []
+        self.value_cache: List[torch.Tensor] = []
+        # Note: There will be significant perf decrease if switching to use 5D tensors instead.
+        cache_shape = (max_batch_size, self.num_key_value_heads, self.max_cache_len, self.head_dim)
+        for idx in range(config.num_hidden_layers):
+            new_layer_key_cache = torch.zeros(cache_shape, dtype=self.dtype, device=device)
+            new_layer_value_cache = torch.zeros(cache_shape, dtype=self.dtype, device=device)
+            # Notes:
+            # 1. `mark_static_address` is used to tag the cache as an fixed data pointer, preventing cuda graph
+            #     breaks when updating the cache. It can't be used if the cache code is being compiled (but in that case
+            #     it is not needed anyway)
+            # 2. `torch.export()` requires mutations to be registered as buffers.
+            if not is_torchdynamo_compiling():
+                self.register_buffer(f"key_cache_{idx}", torch.zeros(cache_shape, dtype=dtype, device=device))
+                self.register_buffer(f"value_cache_{idx}", torch.zeros(cache_shape, dtype=dtype, device=device))
+                new_layer_key_cache = getattr(self, f"key_cache_{idx}")
+                new_layer_value_cache = getattr(self, f"value_cache_{idx}")
+                torch._dynamo.mark_static_address(new_layer_key_cache)
+                torch._dynamo.mark_static_address(new_layer_value_cache)
+            self.key_cache.append(new_layer_key_cache)
+            self.value_cache.append(new_layer_value_cache)
+
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
+        It is VERY important to index using a tensor, otherwise you introduce a copy to the device.
+
+        Parameters:
+            key_states (`torch.Tensor`):
+                The new key states to cache.
+            value_states (`torch.Tensor`):
+                The new value states to cache.
+            layer_idx (`int`):
+                The index of the layer to cache the states for.
+            cache_kwargs (`Dict[str, Any]`, `optional`):
+                Additional arguments for the cache subclass. The `StaticCache` needs the `cache_position` input
+                to know how where to write in the cache.
+
+        Return:
+            A tuple containing the updated key and value states.
+        """
+        cache_position = cache_kwargs.get("cache_position")
+        self.key_cache[layer_idx] = self.key_cache[layer_idx].to(device=key_states.device)
+        self.value_cache[layer_idx] = self.value_cache[layer_idx].to(device=value_states.device)
+        k_out = self.key_cache[layer_idx]
+        v_out = self.value_cache[layer_idx]
+
+        if cache_position is None:
+            k_out.copy_(key_states)
+            v_out.copy_(value_states)
+        else:
+            # Note: here we use `tensor.index_copy_(dim, index, tensor)` that is equivalent to
+            # `tensor[:, :, index] = tensor`, but the first one is compile-friendly and it does explicitly an in-place
+            # operation, that avoids copies and uses less memory.
+            try:
+                k_out.index_copy_(2, cache_position, key_states)
+                v_out.index_copy_(2, cache_position, value_states)
+            except NotImplementedError:
+                # The operator 'aten::index_copy.out' is not currently implemented for the MPS device.
+                k_out[:, :, cache_position] = key_states
+                v_out[:, :, cache_position] = value_states
+
+        return k_out, v_out
+
+    def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
+        """Returns the sequence length of the cached states that were seen by the model."""
+        # Occupied cache == any slot in the 3rd dim (sequence length) holds a non-zero value. To save on compute, let's
+        # limit the check to the first batch member and head dimension.
+        # TODO: deprecate this function in favor of `cache_position`
+        return (self.key_cache[layer_idx][0, 0].any(dim=-1)).sum()
+
+    def get_max_length(self) -> Optional[int]:
+        """Returns the maximum sequence length of the cached states."""
+        return self.max_cache_len
+
+    def reset(self):
+        """Resets the cache values while preserving the objects"""
+        for layer_idx in range(len(self.key_cache)):
+            # In-place ops prevent breaking the static address
+            self.key_cache[layer_idx].zero_()
+            self.value_cache[layer_idx].zero_()
