@@ -197,76 +197,68 @@ import math
 import torch
 import torch.nn.functional as F
 from collections import defaultdict, deque
+import bisect
 
-class HopcroftKarp:
-    def __init__(self, graph, U_nodes, V_nodes):
-        self.graph = graph  # Bipartite graph represented as adjacency lists
-        self.U = U_nodes    # Left partition nodes
-        self.V = V_nodes    # Right partition nodes
 
-    def max_matching(self):
-        pair_U = {u: None for u in self.U}
-        pair_V = {v: None for v in self.V}
-        dist = {u: float('inf') for u in self.U}
-        result = 0
+def solve(num_nodes, example_scores, threshold):
+    # Preprocess and sort all edges by score descending, then v ascending
+    all_edges = []
+    for k in example_scores.keys():
+        all_edges.append(((k[0],k[1]), example_scores[k]))
+    # Sort edges by score descending, then v ascending
+    all_edges.sort(key=lambda x: (-x[1], x[0][1]))
+    scores = [edge[1] for edge in all_edges]
+    unique_scores = sorted(set(scores), reverse=True)
+    if not unique_scores:
+        print(-1)
+        return []
+    print(len(scores),len(unique_scores))
+    best_score = -1
+    best_edges = []
+    
+    low = 0
+    high = len(unique_scores) - 1
 
-        while self.bfs(pair_U, pair_V, dist):
-            for u in self.U:
-                if pair_U[u] is None:
-                    if self.dfs(u, pair_U, pair_V, dist):
-                        result += 1
-        return pair_U,result
+    u_used_base = dict.fromkeys([e[0] for e in example_scores.keys()]+[e[1] for e in example_scores.keys()], False)
+    v_used_base = u_used_base.copy()
 
-    def bfs(self, pair_U, pair_V, dist):
-        queue = deque()
-        for u in self.U:
-            if pair_U[u] is None:
-                dist[u] = 0
-                queue.append(u)
-            else:
-                dist[u] = float('inf')
-        dist[None] = float('inf')
 
-        while queue:
-            u = queue.popleft()
-            if u is not None:
-                for v in self.graph[u]:
-                    if dist[pair_V.get(v)] == float('inf'):
-                        dist[pair_V.get(v)] = dist[u] + 1
-                        queue.append(pair_V.get(v))
-        return dist[None] != float('inf')
+    
+    while low <= high:
+        mid = (low + high) // 2
+        current_score = unique_scores[mid]
+        print(low,high,current_score)
+        # Find the first index where score < current_score using bisect
+        idx = bisect.bisect_left(scores, current_score)
+        candidate_edges = all_edges[:idx]
+        
+        # Greedy selection using boolean arrays for faster access
+        u_used = u_used_base.copy()
+        v_used = v_used_base.copy()
+        selected = []
+        
+        for edge_info in candidate_edges:
+            (u, v), score = edge_info
+            if not u_used[v] and not v_used[u] and not v_used[v]:
+                selected.append((u, v))
+                u_used[u] = True
+                v_used[v] = True
+                if len(selected) >= threshold:
+                    break  # Early exit if threshold is met
+        
+        if len(selected) >= threshold:
+            # Update best_score and best_edges if current is better
+            if current_score > best_score or (current_score == best_score and len(selected) < len(best_edges)):
+                best_score = current_score
+                best_edges = selected
+            low = mid + 1
+        else:
+            high = mid - 1
+    
+    print(best_score if best_score != -1 else -1)
+    return best_edges
 
-    def dfs(self, u, pair_U, pair_V, dist):
-        if u is not None:
-            for v in self.graph[u]:
-                if dist[pair_V.get(v)] == dist[u] + 1:
-                    if self.dfs(pair_V.get(v), pair_U, pair_V, dist):
-                        pair_U[u] = v
-                        pair_V[v] = u
-                        return True
-            dist[u] = float('inf')
-            return False
-        return True
 
-def is_feasible(filtered_pairs, required_size=22*32):
-    # Build bipartite graph
-    left_nodes = set()
-    right_nodes = set()
-    graph = defaultdict(list)
-
-    for pair in filtered_pairs:
-        i, j, seg, hi, hj, _, _ = pair
-        u = (i, seg, hi)
-        v = (j, seg, hj)
-        graph[u].append(v)
-        left_nodes.add(u)
-        right_nodes.add(v)
-
-    # Perform Hopcroft-Karp algorithm
-    hk = HopcroftKarp(graph, left_nodes, right_nodes)
-    max_match = hk.max_matching()[1]
-
-    return max_match >= required_size
 
 class DynamicCache(Cache):
     """
@@ -390,64 +382,53 @@ class DynamicCache(Cache):
                             p_norm = p_head.norm(dim=-1).mean().item()
                             s_norm = s_head.norm(dim=-1).mean().item()
                             scaling = s_norm / p_norm if p_norm != 0 else 0.0
-
-                            # Store matched pair information
-                            if sim < 0.9:
-                                continue
                             # import random
                             # sim = random.random()
                             # scaling=1
+                            # Store matched pair information
+                            if sim < 0.97:
+                                continue
+                            
                             if i==j and head_i==head_j:
                                 continue
-                            all_pairs.append((i, j, 0, head_i, head_j, sim, scaling))
+                            all_pairs.append([i, j, 0, head_i, head_j, sim, scaling])
 
             # Binary search for maximum minimal similarity
             all_pairs_sorted = sorted(all_pairs, key=lambda x: x[5])  # Sort by similarity
-            low = 0
-            high = len(all_pairs_sorted) - 1
-            best_index = 0
 
-            while low <= high:
-                mid = (low + high) // 2
-                current_S = all_pairs_sorted[mid][5]
-                filtered_pairs = [pair for pair in all_pairs if pair[5] >= current_S]
-                if is_feasible(filtered_pairs):
-                    best_index = mid
-                    low = mid + 1
+            num = len(all_pairs_sorted)
+            print('num',num)
+            example_scores = {}
+            avg = {}
+            for e in all_pairs_sorted:
+                example_scores[((e[0],e[3]),(e[1],e[4]))] = e[5]
+                if avg.get((e[0],e[3])) == None:
+                    avg[(e[0],e[3])] = e[5]
                 else:
-                    high = mid - 1
-
-            best_s = all_pairs_sorted[best_index][5]
-            filtered_pairs = [pair for pair in all_pairs if pair[5] >= best_s]
-
-            # Build bipartite graph for best_s and find maximum matching
-            graph = defaultdict(list)
-            left_nodes = set()
-            right_nodes = set()
-            map_s = {}
-
-            for pair in filtered_pairs:
-                i, j, seg, hi, hj, sim, scaling = pair
-                u = (i, seg, hi)
-                v = (j, seg, hj)
-                map_s[(u,v)] = (sim, scaling)
-                graph[u].append(v)
-                left_nodes.add(u)
-                right_nodes.add(v)
-
-            hk = HopcroftKarp(graph, left_nodes, right_nodes)
-            pair_U = hk.max_matching()[0]
+                    avg[(e[0],e[3])]+=e[5]
+            for i in range(len(all_pairs_sorted)):
+                all_pairs_sorted[i][-1] = avg[(all_pairs_sorted[i][0],all_pairs_sorted[i][3])]
+            all_pairs_sorted.sort(key = lambda x:(-x[-1],-x[-2]))
+            # result = solve(num,example_scores,22*32)
+            replaced_segment = set() #j
+            used_segment = set()#i
+            for item in all_pairs_sorted:
+                i,j,_,hi,hj,s,avg_s = item
+                if len(replaced_segment) < 22*32 and (i,hi) not in replaced_segment and (j,hj) not in replaced_segment and (j,hj) not in used_segment:
+                    replaced_segment.add( (j,hj) )
+                    used_segment.add( (i,hi) )
+                    self.layer_map.append((i, j, 0, hi, hj, s, avg_s))
 
             # Update the cache based on the maximum matching
-            replaced_segment = set()
-            for u in left_nodes:
-                if pair_U[u] is not None and len(replaced_segment) < 22*32:
-                    i, seg, hi = u
-                    j, _, hj = pair_U[u]
-                    replaced_segment.add( (j, seg, hj) )
-                    self.retained_key_cache[j][:, hj, 128:-128, :] = self.retained_key_cache[i][:, hi, 128:-128, :]
-                    self.layer_map.append((i, j, seg, hi, hj, map_s[(u,pair_U[u])][0],map_s[(u,pair_U[u])][1]))
-                    print('sim',map_s[(u,pair_U[u])][0])
+            
+            # for e in result:
+            #     if len(replaced_segment) < 22*32:
+            #         i, hi = e[0]
+            #         j, hj = e[1]
+            #         replaced_segment.add( (j, 0, hj) )
+            #         self.retained_key_cache[j][:, hj, 128:-128, :] = self.retained_key_cache[i][:, hi, 128:-128, :]
+            #         self.layer_map.append((i, j, 0, hi, hj, example_scores[(i,hi),(j,hj)], 0))
+            #         # print('sim',map_s[(u,pair_U[u])][0])
 
         # Rest of the code for cache updates
         self.key_unit_cache.append(None)
