@@ -428,7 +428,7 @@ class DynamicCache(Cache):
                 if len(replaced_segment) < 22*32 and (i,hi) not in replaced_segment and (j,hj) not in replaced_segment and (j,hj) not in used_segment:
                     replaced_segment.add( (j,hj) )
                     used_segment.add( (i,hi) )
-                    self.layer_map.append((i, j, _, hi, hj, s, avg_s))
+                    self.layer_map.append((i, j, 0, hi, hj, s, avg_s))
 
             # Update the cache based on the maximum matching
             
