@@ -481,28 +481,21 @@ class DynamicCache(Cache):
                 attn_weights_sum_prev = attn_lis[i]
                 all_indices = (F.max_pool1d(attn_weights_sum_prev, kernel_size = 7, padding=7//2, stride=1)).topk((scaled_size-window_size-sink_size), dim=-1).indices #[1,h,10]
                 counter = 0
-                for j in range(32):
-                    if abs(i-j)>5:
-                        continue
 
-                    # Get query-key pairs for both layers 
-                    # segment = torch.matmul(self.query_cache[j][:,:,-window_size:,:], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                    # # s = segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
-                    # segment[:, :, -window_size:, -window_size:] += attention_mask
-                    # attn_weights = segment
-                    # attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(self.retained_key_cache[j].dtype)
-                    # attn_weights_sum = attn_weights[:, :, -window_size:, sink_size:-window_size ].sum(dim = -2)
-                    attn_weights_sum = attn_lis[j]
-                    diff = abs((attn_weights_sum_prev-attn_weights_sum))
-                    # diff = F.max_pool1d(diff, kernel_size = 7, padding=7//2, stride=1)
-                    if attn_diff[i] == None:
-                        attn_diff[i] = diff
-                        # counter +=1
-                    else:
-                        # attn_diff[i] *= counter
-                        attn_diff[i] += diff
-                        # counter +=1
-                        # attn_diff[i]/=counter
+                h, n, d = attn_weights_sum_prev.shape  # Get dimensions
+    
+                # Expand dimensions for broadcasting
+                # attn_weights_sum_prev: [h, n, d] -> [h, 1, n, d]
+                attn_weights_sum_prev_expanded = attn_weights_sum_prev.unsqueeze(1)
+                
+                # Compute pairwise absolute differences
+                # diffs: [h, h, n, d]
+                diffs = torch.abs(attn_weights_sum_prev_expanded - attn_weights_sum_prev.unsqueeze(0))
+                
+                # Sum the differences along the head dimension (dim=1)
+                # result: [h, n, d]
+                attn_diff[i] = torch.sum(diffs, dim=1)
+                
 
                 attn_diff[i] = F.max_pool1d(attn_diff[i], kernel_size = 7, padding=7//2, stride=1)
                 selected_attn_diff =torch.gather(attn_diff[i], dim=-1, index=all_indices)

@@ -8,8 +8,8 @@ from tqdm import tqdm
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
-datasets = [ "narrativeqa", "multifieldqa_en",  "hotpotqa", "2wikimqa", "musique", \
+# "narrativeqa", "multifieldqa_en", 
+datasets = [  "hotpotqa", "2wikimqa", "musique", \
               "passage_count", "passage_retrieval_en"]
 # datasets = ["trec", "triviaqa", "samsum", \
 #             "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
