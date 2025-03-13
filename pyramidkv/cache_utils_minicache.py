@@ -386,7 +386,7 @@ class DynamicCache(Cache):
                             # sim = random.random()
                             # scaling=1
                             # Store matched pair information
-                            if sim < 0.97:
+                            if sim < 0.98:
                                 continue
                             
                             if i==j and head_i==head_j:
@@ -400,15 +400,26 @@ class DynamicCache(Cache):
             print('num',num)
             example_scores = {}
             avg = {}
+            avg_counter = {}
+            target_avg = {}
             for e in all_pairs_sorted:
                 example_scores[((e[0],e[3]),(e[1],e[4]))] = e[5]
+                
                 if avg.get((e[0],e[3])) == None:
                     avg[(e[0],e[3])] = e[5]
+                    avg_counter[(e[0],e[3])] = 1
                 else:
                     avg[(e[0],e[3])]+=e[5]
+                    avg_counter[(e[0],e[3])] += 1
+                if target_avg.get((e[1],e[4])) == None:
+                    target_avg[(e[1],e[4])] = e[5]
+                else:
+                    target_avg[(e[1],e[4])]+=e[5]
             for i in range(len(all_pairs_sorted)):
-                all_pairs_sorted[i][-1] = avg[(all_pairs_sorted[i][0],all_pairs_sorted[i][3])]
-            all_pairs_sorted.sort(key = lambda x:(-x[-1],-x[-2]))
+                all_pairs_sorted[i][-1] = avg[(all_pairs_sorted[i][0],all_pairs_sorted[i][3])]/avg_counter[(all_pairs_sorted[i][0],all_pairs_sorted[i][3])]
+                all_pairs_sorted[i][2] = target_avg[(all_pairs_sorted[i][1],all_pairs_sorted[i][4])]
+            import random
+            all_pairs_sorted.sort(key = lambda x:(-x[2],-x[-1]))
             # result = solve(num,example_scores,22*32)
             replaced_segment = set() #j
             used_segment = set()#i
@@ -417,7 +428,7 @@ class DynamicCache(Cache):
                 if len(replaced_segment) < 22*32 and (i,hi) not in replaced_segment and (j,hj) not in replaced_segment and (j,hj) not in used_segment:
                     replaced_segment.add( (j,hj) )
                     used_segment.add( (i,hi) )
-                    self.layer_map.append((i, j, 0, hi, hj, s, avg_s))
+                    self.layer_map.append((i, j, _, hi, hj, s, avg_s))
 
             # Update the cache based on the maximum matching
             
