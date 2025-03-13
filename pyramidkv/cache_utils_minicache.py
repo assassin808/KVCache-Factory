@@ -386,7 +386,7 @@ class DynamicCache(Cache):
                             # sim = random.random()
                             # scaling=1
                             # Store matched pair information
-                            if sim < 0.97:
+                            if sim < 0.96:
                                 continue
                             
                             if i==j and head_i==head_j:
@@ -419,7 +419,7 @@ class DynamicCache(Cache):
                 all_pairs_sorted[i][-1] = avg[(all_pairs_sorted[i][0],all_pairs_sorted[i][3])]/avg_counter[(all_pairs_sorted[i][0],all_pairs_sorted[i][3])]
                 all_pairs_sorted[i][2] = target_avg[(all_pairs_sorted[i][1],all_pairs_sorted[i][4])]
             import random
-            all_pairs_sorted.sort(key = lambda x:(-x[-1]))
+            all_pairs_sorted.sort(key = lambda x:(-x[-2]))
             # result = solve(num,example_scores,22*32)
             replaced_segment = set() #j
             used_segment = set()#i
