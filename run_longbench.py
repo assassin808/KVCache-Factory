@@ -9,10 +9,12 @@ from tqdm import tqdm
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-datasets = [ "narrativeqa","qasper", "multifieldqa_en",  "hotpotqa", "2wikimqa", "musique", \
-            "gov_report", "qmsum", "multi_news", "trec", "triviaqa", "samsum", \
-            "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
+datasets = [ "narrativeqa", "multifieldqa_en",  "hotpotqa", "2wikimqa", "musique", \
+              "passage_count", "passage_retrieval_en"]
 # datasets = ["trec", "triviaqa", "samsum", \
+#             "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
+# datasets = [ "narrativeqa",, "multifieldqa_en",  "hotpotqa", "2wikimqa", "musique", \
+#             "gov_report", "qmsum", "multi_news", "trec", "triviaqa", "samsum", \
 #             "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
 dataset2maxlen = {
     "narrativeqa": 128,
