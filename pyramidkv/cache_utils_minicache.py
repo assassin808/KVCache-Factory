@@ -402,6 +402,7 @@ class DynamicCache(Cache):
             avg = {}
             avg_counter = {}
             target_avg = {}
+            target_counter = {}
             for e in all_pairs_sorted:
                 example_scores[((e[0],e[3]),(e[1],e[4]))] = e[5]
                 
@@ -413,19 +414,22 @@ class DynamicCache(Cache):
                     avg_counter[(e[0],e[3])] += 1
                 if target_avg.get((e[1],e[4])) == None:
                     target_avg[(e[1],e[4])] = e[5]
+                    target_counter[(e[1],e[4])] = 1
                 else:
                     target_avg[(e[1],e[4])]+=e[5]
+                    target_counter[(e[1],e[4])]+=1
+
             for i in range(len(all_pairs_sorted)):
                 all_pairs_sorted[i][-1] = avg[(all_pairs_sorted[i][0],all_pairs_sorted[i][3])]/avg_counter[(all_pairs_sorted[i][0],all_pairs_sorted[i][3])]
-                all_pairs_sorted[i][2] = target_avg[(all_pairs_sorted[i][1],all_pairs_sorted[i][4])]
+                all_pairs_sorted[i][2] = target_avg[(all_pairs_sorted[i][1],all_pairs_sorted[i][4])]/target_counter[(all_pairs_sorted[i][1],all_pairs_sorted[i][4])]
             import random
             all_pairs_sorted.sort(key = lambda x:(-x[2],-x[-1]))
-            # result = solve(num,example_scores,23*32)
+            # result = solve(num,example_scores,22*32)
             replaced_segment = set() #j
             used_segment = set()#i
             for item in all_pairs_sorted:
                 i,j,_,hi,hj,s,avg_s = item
-                if len(replaced_segment) < 23*32 and (i,hi) not in replaced_segment and (j,hj) not in replaced_segment and (j,hj) not in used_segment:
+                if len(replaced_segment) < 22*32 and (i,hi) not in replaced_segment and (j,hj) not in replaced_segment and (j,hj) not in used_segment:
                     replaced_segment.add( (j,hj) )
                     used_segment.add( (i,hi) )
                     self.layer_map.append((i, j, 0, hi, hj, s, avg_s))
@@ -433,7 +437,7 @@ class DynamicCache(Cache):
             # Update the cache based on the maximum matching
             
             # for e in result:
-            #     if len(replaced_segment) < 23*32:
+            #     if len(replaced_segment) < 22*32:
             #         i, hi = e[0]
             #         j, hj = e[1]
             #         replaced_segment.add( (j, 0, hj) )
