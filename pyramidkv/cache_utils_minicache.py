@@ -420,12 +420,12 @@ class DynamicCache(Cache):
                 all_pairs_sorted[i][2] = target_avg[(all_pairs_sorted[i][1],all_pairs_sorted[i][4])]
             import random
             all_pairs_sorted.sort(key = lambda x:(-x[2],-x[-1]))
-            # result = solve(num,example_scores,24*32)
+            # result = solve(num,example_scores,23*32)
             replaced_segment = set() #j
             used_segment = set()#i
             for item in all_pairs_sorted:
                 i,j,_,hi,hj,s,avg_s = item
-                if len(replaced_segment) < 24*32 and (i,hi) not in replaced_segment and (j,hj) not in replaced_segment and (j,hj) not in used_segment:
+                if len(replaced_segment) < 23*32 and (i,hi) not in replaced_segment and (j,hj) not in replaced_segment and (j,hj) not in used_segment:
                     replaced_segment.add( (j,hj) )
                     used_segment.add( (i,hi) )
                     self.layer_map.append((i, j, 0, hi, hj, s, avg_s))
@@ -433,7 +433,7 @@ class DynamicCache(Cache):
             # Update the cache based on the maximum matching
             
             # for e in result:
-            #     if len(replaced_segment) < 24*32:
+            #     if len(replaced_segment) < 23*32:
             #         i, hi = e[0]
             #         j, hj = e[1]
             #         replaced_segment.add( (j, 0, hj) )
