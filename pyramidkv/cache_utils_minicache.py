@@ -486,7 +486,7 @@ class DynamicCache(Cache):
                 # attn_weights_sum_prev = attn_weights[:, :, -window_size:, sink_size:-window_size ].sum(dim = -2)
                 attn_weights_sum_prev = attn_lis[i]
                 all_indices = (F.max_pool1d(attn_weights_sum_prev, kernel_size = 7, padding=7//2, stride=1)).topk((scaled_size-window_size-sink_size), dim=-1).indices #[1,h,10]
-                counter = 0
+
 
                 h, n, d = attn_weights_sum_prev.shape  # Get dimensions
     
@@ -495,13 +495,18 @@ class DynamicCache(Cache):
                 # attn_weights_sum_prev_expanded = attn_weights_sum_prev.unsqueeze(1)
                 
                 diff = attn_weights_sum_prev.clone()
-                counter = 0
+                counter = [1 for i in range(32)]
                 for item in pair_map[i]:   
-                    diff[:,item[0]:item[0]+1,:] += abs(attn_weights_sum_prev[:,item[0]:item[0]+1,:]-attn_lis[item[1]][:,item[2]:item[2]+1,:])
-                    counter += 1
-                attn_diff[i] = diff-attn_weights_sum_prev
-                if counter != 0:
-                    attn_diff[i]/=counter
+                    diff[:,item[0]:item[0]+1,:] += attn_lis[item[1]][:,item[2]:item[2]+1,:]
+                    counter[item[0]] += 1
+                # attn_diff[i] = diff-attn_weights_sum_prev
+                attn_diff[i] = diff
+                for index in range(32):
+                    if counter != 0:
+                        attn_diff[i][:,index:index+1,:]/=counter[index]
+                # if counter != 0:
+                #     attn_diff[i]/=counter
+                # attn_diff[i] = attn_weights_sum_prev
                 
                 
                 # # Compute pairwise absolute differences
@@ -513,7 +518,7 @@ class DynamicCache(Cache):
                 # attn_diff[i] = torch.sum(diffs, dim=1)
                 
 
-                attn_diff[i] = F.max_pool1d(attn_diff[i], kernel_size = 7, padding=7//2, stride=1)
+                # attn_diff[i] = F.max_pool1d(attn_diff[i], kernel_size = 7, padding=7//2, stride=1)
                 selected_attn_diff =torch.gather(attn_diff[i], dim=-1, index=all_indices)
                 indices = selected_attn_diff.topk((int(scaled_size*ratio) - window_size - sink_size), dim=-1).indices
                 indices = torch.gather(all_indices, dim=-1, index=indices)
