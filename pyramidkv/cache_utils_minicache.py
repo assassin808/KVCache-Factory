@@ -318,7 +318,7 @@ class DynamicCache(Cache):
         attention_mask = mask[None, None, :, :]
         def f(a,n=256):
                 return int(n/(10/32+22/32*(a+1)/2))
-        ratio = 0.4
+        ratio = 0.6
         scaled_size = min(f(ratio,max_len),self.retained_key_cache[0].shape[2])
         
 
