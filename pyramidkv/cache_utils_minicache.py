@@ -198,6 +198,73 @@ class CacheConfig:
         unused_kwargs = {key: value for key, value in kwargs.items() if key not in to_remove}
         return unused_kwargs
 
+import math
+import torch
+import torch.nn.functional as F
+from collections import defaultdict, deque
+import bisect
+
+
+def solve(num_nodes, example_scores, threshold):
+    # Preprocess and sort all edges by score descending, then v ascending
+    all_edges = []
+    for k in example_scores.keys():
+        all_edges.append(((k[0],k[1]), example_scores[k]))
+    # Sort edges by score descending, then v ascending
+    all_edges.sort(key=lambda x: (-x[1], x[0][1]))
+    scores = [edge[1] for edge in all_edges]
+    unique_scores = sorted(set(scores), reverse=True)
+    if not unique_scores:
+        print(-1)
+        return []
+    print(len(scores),len(unique_scores))
+    best_score = -1
+    best_edges = []
+    
+    low = 0
+    high = len(unique_scores) - 1
+
+    u_used_base = dict.fromkeys([e[0] for e in example_scores.keys()]+[e[1] for e in example_scores.keys()], False)
+    v_used_base = u_used_base.copy()
+
+
+    
+    while low <= high:
+        mid = (low + high) // 2
+        current_score = unique_scores[mid]
+        print(low,high,current_score)
+        # Find the first index where score < current_score using bisect
+        idx = bisect.bisect_left(scores, current_score)
+        candidate_edges = all_edges[:idx]
+        
+        # Greedy selection using boolean arrays for faster access
+        u_used = u_used_base.copy()
+        v_used = v_used_base.copy()
+        selected = []
+        
+        for edge_info in candidate_edges:
+            (u, v), score = edge_info
+            if not u_used[v] and not v_used[u] and not v_used[v]:
+                selected.append((u, v))
+                u_used[u] = True
+                v_used[v] = True
+                if len(selected) >= threshold:
+                    break  # Early exit if threshold is met
+        
+        if len(selected) >= threshold:
+            # Update best_score and best_edges if current is better
+            if current_score > best_score or (current_score == best_score and len(selected) < len(best_edges)):
+                best_score = current_score
+                best_edges = selected
+            low = mid + 1
+        else:
+            high = mid - 1
+    
+    print(best_score if best_score != -1 else -1)
+    return best_edges
+
+
+
 class DynamicCache(Cache):
     """
     A cache that grows dynamically as more tokens are generated. This is the default for generative models.
@@ -267,6 +334,8 @@ class DynamicCache(Cache):
         to the number of layers in the model.
         """
         return len(self.retained_key_cache)
+
+
     def update(
         self,
         key_states: torch.Tensor,
@@ -278,30 +347,21 @@ class DynamicCache(Cache):
         attention_mask = None,
         max_len = 256,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+            self,
+            key_states: torch.Tensor,
+            value_states: torch.Tensor,
+            layer_idx: int,
+            cache_kwargs: Optional[Dict[str, Any]] = None,
+            hidden_states: torch.Tensor = None, 
+            query_states: torch.Tensor = None, 
+            attention_mask = None,
+        ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
-
-        Parameters:
-            key_states (`torch.Tensor`):
-                The new key states to cache.
-            value_states (`torch.Tensor`):
-                The new value states to cache.
-            layer_idx (`int`):
-                The index of the layer to cache the states for.
-            cache_kwargs (`Dict[str, Any]`, `optional`):
-                Additional arguments for the cache subclass. No additional arguments are used in `DynamicCache`.
-            hidden_states (`torch.Tensor`, `optional`):
-                The hidden states for the layer `layer_idx`.
-
-        Return:
-            A tuple containing the updated key, value states and hidden states.
+        Optimized cache update with maximum minimal similarity approach.
         """
-        # Update the number of seen tokens
         if layer_idx == 0:
             self._seen_tokens += key_states.shape[-2]
 
-        # Update the cache
-        assert len(self.retained_key_cache) <= layer_idx
         self.retained_key_cache.append(key_states)
         self.retained_value_cache.append(value_states)
         self.hidden_states.append(None)
@@ -364,6 +424,18 @@ class DynamicCache(Cache):
                     for j in range(32):
                         if i >= j:
                             continue
+        self.query_cache.append(query_states)
+        window_size = 8
+        if layer_idx == 31:
+            all_pairs = []
+            for i in range(32):
+                print(i)
+                prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                p = prev_segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
+                p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D
+                for j in range(32):
+                    if i > j:
+                        continue
 
                         # Get query-key pairs for both layers 
                         segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
@@ -377,6 +449,18 @@ class DynamicCache(Cache):
                         for head_i in range(cosine_sim_avg.size(0)):
                             for head_j in range(cosine_sim_avg.size(1)):
                                 sim = cosine_sim_avg[head_i][head_j].item()
+                    # Get query-key pairs for both layers 
+                    segment = torch.matmul(self.query_cache[j][:,:,-window_size:,:], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+                    s = segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
+                    s_expanded = s.unsqueeze(0)  # [H_i, 1, S, D
+
+                    cosine_sim = F.cosine_similarity(p_expanded, s_expanded, dim=-1)
+                    cosine_sim_avg = cosine_sim.mean(dim=-1)  # [H_i, H_j]
+                    # Find best matches for each head in layer i
+
+                    for head_i in range(32):
+                        for head_j in range(32):
+                            sim = cosine_sim_avg[head_i][head_j].item()
 
 
                                 # Calculate norm scaling for matched heads
@@ -621,6 +705,89 @@ class DynamicCache(Cache):
         ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], None)
        
         return ret_value[0], ret_value[1], ret_value[2]
+                            # Calculate norm scaling for matched heads
+                            p_head = p[head_i]
+                            s_head = s[head_j]
+                            p_norm = p_head.norm(dim=-1).mean().item()
+                            s_norm = s_head.norm(dim=-1).mean().item()
+                            scaling = s_norm / p_norm if p_norm != 0 else 0.0
+                            # import random
+                            # sim = random.random()
+                            # scaling=1
+                            # Store matched pair information
+                            if sim < 0.9:
+                                continue
+                            
+                            if i==j and head_i==head_j:
+                                continue
+                            all_pairs.append([i, j, 0, head_i, head_j, sim, scaling])
+
+            # Binary search for maximum minimal similarity
+            all_pairs_sorted = sorted(all_pairs, key=lambda x: x[5])  # Sort by similarity
+
+            num = len(all_pairs_sorted)
+            print('num',num)
+            example_scores = {}
+            avg = {}
+            avg_counter = {}
+            target_avg = {}
+            target_counter = {}
+            for e in all_pairs_sorted:
+                example_scores[((e[0],e[3]),(e[1],e[4]))] = e[5]
+                
+                if avg.get((e[0],e[3])) == None:
+                    avg[(e[0],e[3])] = e[5]
+                    avg_counter[(e[0],e[3])] = 1
+                else:
+                    avg[(e[0],e[3])]+=e[5]
+                    avg_counter[(e[0],e[3])] += 1
+                if target_avg.get((e[1],e[4])) == None:
+                    target_avg[(e[1],e[4])] = e[5]
+                    target_counter[(e[1],e[4])] = 1
+                else:
+                    target_avg[(e[1],e[4])]+=e[5]
+                    target_counter[(e[1],e[4])]+=1
+
+            for i in range(len(all_pairs_sorted)):
+                all_pairs_sorted[i][-1] = avg[(all_pairs_sorted[i][0],all_pairs_sorted[i][3])]/avg_counter[(all_pairs_sorted[i][0],all_pairs_sorted[i][3])]
+                all_pairs_sorted[i][2] = target_avg[(all_pairs_sorted[i][1],all_pairs_sorted[i][4])]/target_counter[(all_pairs_sorted[i][1],all_pairs_sorted[i][4])]
+            import random
+            all_pairs_sorted.sort(key = lambda x:(-x[2],-x[-1]))
+            # result = solve(num,example_scores,22*32)
+            replaced_segment = set() #j
+            used_segment = set()#i
+            for item in all_pairs_sorted:
+                i,j,_,hi,hj,s,avg_s = item
+                if len(replaced_segment) < 22*32 and (i,hi) not in replaced_segment and (j,hj) not in replaced_segment and (j,hj) not in used_segment:
+                    replaced_segment.add( (j,hj) )
+                    used_segment.add( (i,hi) )
+                    self.layer_map.append((i, j, 0, hi, hj, s, avg_s))
+
+            # Update the cache based on the maximum matching
+            
+            # for e in result:
+            #     if len(replaced_segment) < 22*32:
+            #         i, hi = e[0]
+            #         j, hj = e[1]
+            #         replaced_segment.add( (j, 0, hj) )
+            #         self.retained_key_cache[j][:, hj, 128:-128, :] = self.retained_key_cache[i][:, hi, 128:-128, :]
+            #         self.layer_map.append((i, j, 0, hi, hj, example_scores[(i,hi),(j,hj)], 0))
+            #         # print('sim',map_s[(u,pair_U[u])][0])
+
+        # Rest of the code for cache updates
+        self.key_unit_cache.append(None)
+        self.value_unit_cache.append(None)
+        self.key_magnitude.append(None)
+        self.value_magnitude.append(None)
+        self.mask_k.append(None)
+        self.mask_v.append(None)
+        if layer_idx == 31:
+                with open('layer_map_final.csv', 'w') as f:
+                    for item in self.layer_map:
+                        f.write(','.join([str(i) for i in item]) + '\n')
+                exit(0)
+
+        return (self.retained_key_cache[layer_idx].clone(), self.retained_value_cache[layer_idx].clone(), self.hidden_states[layer_idx])
     def update_miniCache(
             self,
             key_states: torch.Tensor,
