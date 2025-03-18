@@ -465,15 +465,16 @@ class DynamicCache(Cache):
                     temp = layer_map[-1]
                     pair_map[temp[0]].append((temp[3], temp[1],temp[4]))
 
-            for i in range(32):
-                prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                prev_segment[:, :, -window_size:, -window_size:] += attention_mask
-                attn_weights = prev_segment
-                attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(self.retained_key_cache[i].dtype)
-                attn_weights_sum_prev = attn_weights[:, :, -window_size:, sink_size:-window_size ].sum(dim = -2)
-                attn_lis.append(
-                    attn_weights_sum_prev
-                )
+            # for i in range(32):
+            #     prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
+            #     prev_segment[:, :, -window_size:, -window_size:] += attention_mask
+            #     attn_weights = prev_segment
+            #     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(self.retained_key_cache[i].dtype)
+            #     attn_weights_sum_prev = attn_weights[:, :, -window_size:, sink_size:-window_size ].sum(dim = -2)
+            #     attn_lis.append(
+            #         attn_weights_sum_prev
+            #     )
+            attn_lis = self.query_cache
             for i in range(32):
                 attn_diff[i] = None
                 # min_num = (256-16)//2
