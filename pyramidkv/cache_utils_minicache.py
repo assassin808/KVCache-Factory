@@ -405,6 +405,9 @@ class DynamicCache(Cache):
 
             # Binary search for maximum minimal similarity
             all_pairs_sorted = sorted(all_pairs, key=lambda x: x[5])  # Sort by similarity
+            # with open('layer_map.csv','w') as f:
+            #     for item in all_pairs:
+            #             f.write(','.join([str(i) for i in item]) + '\n')
 
             num = len(all_pairs_sorted)
             print('num',num)

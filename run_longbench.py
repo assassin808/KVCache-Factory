@@ -12,7 +12,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 datasets = [ "narrativeqa","qasper", "multifieldqa_en",  "hotpotqa", "2wikimqa", "musique", \
             "gov_report", "qmsum", "multi_news", "trec", "triviaqa", "samsum", \
             "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
-# datasets = ["narrativeqa"]
+datasets = ["passage_retrieval_en"]
 dataset2maxlen = {
     "narrativeqa": 128,
     "qasper": 128,
