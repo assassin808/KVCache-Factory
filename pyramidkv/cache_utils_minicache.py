@@ -433,7 +433,7 @@ class DynamicCache(Cache):
                     target_counter[(e[1],e[4])]+=1
 
             for i in range(len(all_pairs_sorted)):
-                all_pairs_sorted[i][-1] = avg[(all_pairs_sorted[i][0],all_pairs_sorted[i][3])]/avg_counter[(all_pairs_sorted[i][0],all_pairs_sorted[i][3])]
+                # all_pairs_sorted[i][-1] = avg[(all_pairs_sorted[i][0],all_pairs_sorted[i][3])]/avg_counter[(all_pairs_sorted[i][0],all_pairs_sorted[i][3])]
                 all_pairs_sorted[i][2] = target_avg[(all_pairs_sorted[i][1],all_pairs_sorted[i][4])]/target_counter[(all_pairs_sorted[i][1],all_pairs_sorted[i][4])]
             import random
             all_pairs_sorted.sort(key = lambda x:(-x[-2],-x[-2]))
