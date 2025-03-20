@@ -318,7 +318,7 @@ class DynamicCache(Cache):
         attention_mask = mask[None, None, :, :]
         def f(a,n=256):
                 return int(n/(10/32+22/32*(a+1)/2))
-        ratio = 0.6
+        ratio = 0.8
         scaled_size = min(f(ratio,max_len),self.retained_key_cache[0].shape[2])
         
 
@@ -382,9 +382,9 @@ class DynamicCache(Cache):
                                 # Calculate norm scaling for matched heads
                                 p_head = p[head_i]
                                 s_head = s[head_j]
-                                p_norm = p_head.norm(dim=-1).mean().item()
-                                s_norm = s_head.norm(dim=-1).mean().item()
-                                scaling = s_norm / p_norm if p_norm != 0 else 0.0
+                                p_norm = p_head.norm(dim=-1)
+                                s_norm = s_head.norm(dim=-1)
+                                scaling = (s_norm / p_norm).mean().item() if p_norm != 0 else 0.0
 
                                 # Store matched pair information
                                 if sim < 0.9:
@@ -509,13 +509,13 @@ class DynamicCache(Cache):
                 diff = attn_weights_sum_prev.clone()
                 counter = [1 for i in range(32)]
                 for item in pair_map[i]:   
-                    diff[:,item[0]:item[0]+1,:] += attn_lis[item[1]][:,item[2]:item[2]+1,:]
+                    diff[:,item[0]:item[0]+1,:] += abs(diff[:,item[0]:item[0]+1,:]-attn_lis[item[1]][:,item[2]:item[2]+1,:])
                     counter[item[0]] += 1
-                # attn_diff[i] = diff-attn_weights_sum_prev
-                attn_diff[i] = diff
-                for index in range(32):
-                    if counter != 0:
-                        attn_diff[i][:,index:index+1,:]/=counter[index]
+                attn_diff[i] = diff-attn_weights_sum_prev
+                # attn_diff[i] = diff
+                # for index in range(32):
+                #     if counter != 0:
+                #         attn_diff[i][:,index:index+1,:]/=counter[index]
                 # if counter != 0:
                 #     attn_diff[i]/=counter
                 # attn_diff[i] = attn_weights_sum_prev
