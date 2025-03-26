@@ -677,7 +677,7 @@ def mistral_flash_attn2_forward_MiniCache(
             )
 
 
-            gate = torch.nan_to_num(gate, 0.9)
+            gate = torch.nan_to_num(gate, 1.0)
             
             gate = gate.transpose(1, 2).unsqueeze(-1)
             # print(attn_output.shape,attn_output_proximal.shape,gate.shape)
