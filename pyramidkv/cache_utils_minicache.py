@@ -199,49 +199,393 @@ class CacheConfig:
         return unused_kwargs
 
 class DynamicCache(Cache):
-    """
-    A cache that grows dynamically as more tokens are generated. This is the default for generative models.
+    def __init__(self, config: PretrainedConfig = None, sink_size: int = 8, window_size: int = 8) -> None:
+        super().__init__()
+        self.config = config if config is not None else PretrainedConfig()
+        self.num_hidden_layers = self.config.num_hidden_layers
+        self.num_heads = self.config.num_attention_heads
+        self.head_dim = self.config.hidden_size // self.config.num_attention_heads
+        
+        self.sink_size = sink_size
+        self.window_size = window_size
 
-    It stores the Key and Value states as a list of tensors, one for each layer. The expected shape for each tensor is
-    `[batch_size, num_heads, seq_len, head_dim]`.
+        self.prefill_len = 0 # Not directly used in the logic below but present in your class
 
-    Example:
+        # These will store the final structured K/V caches [B, H, S_layer, D]
+        self.retained_key_cache: List[Optional[torch.Tensor]] = [None] * self.num_hidden_layers
+        self.retained_value_cache: List[Optional[torch.Tensor]] = [None] * self.num_hidden_layers
+        # key_unit_cache can store Tensors or Reuse Dictionaries
+        self.key_unit_cache: List[Optional[Union[torch.Tensor, Dict]]] = [None] * self.num_hidden_layers
+        self.value_unit_cache: List[Optional[torch.Tensor]] = [None] * self.num_hidden_layers
+        
+        # Temporary caches during prefill, before restructuring
+        self._original_key_cache: List[torch.Tensor] = []
+        self._original_value_cache: List[torch.Tensor] = []
 
-        ```python
-        >>> from transformers import AutoTokenizer, AutoModelForCausalLM, DynamicCache
+        # For importance scoring and reuse logic
+        self.query_cache: List[Optional[torch.Tensor]] = [None] * self.num_hidden_layers
+        self.decode_q: List[Optional[torch.Tensor]] = [None] * self.num_hidden_layers
+        self.layer_map: Dict[int, Dict[int, Tuple[int, int, float]]] = {} # target_l -> {target_h -> (anchor_l, anchor_h, scale)}
+        
+        # Temporarily stores (unit_indices_abs, retained_core_indices_abs) per layer during restructuring
+        # Each element: Tuple[Tensor[B,H,N_unit], Tensor[B,H,N_core]]
+        self.indices_analysis_results: List[Optional[Tuple[torch.Tensor, torch.Tensor]]] = [None] * self.num_hidden_layers
 
-        >>> model = AutoModelForCausalLM.from_pretrained("openai-community/gpt2")
-        >>> tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
+        # Other attributes from your original class
+        self.key_magnitude: List[torch.Tensor] = [] # Role in reuse unclear, keeping for compatibility
+        self.value_magnitude: List[torch.Tensor] = []
+        self.mask_k: List[torch.Tensor] = []
+        self.mask_v: List[torch.Tensor] = []
+        self.hidden_states_list: List[torch.Tensor] = [] # Renamed from self.hidden_states to avoid confusion
 
-        >>> inputs = tokenizer(text="My name is GPT2", return_tensors="pt")
+    def _prepare_device_dtype_from_states(self, key_states):
+        return key_states.device, key_states.dtype
 
-        >>> # Prepare a cache class and pass it to model's forward
-        >>> past_key_values = DynamicCache()
-        >>> outputs = model(**inputs, past_key_values=past_key_values, use_cache=True)
-        >>> past_kv_length = outputs.past_key_values # access cache filled with key/values from generation
-        ```
-    """
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+        hidden_states: Optional[torch.Tensor] = None, # Passed as hidden_states_input in my prev example
+        query_states: Optional[torch.Tensor] = None, # Passed as query_states_input
+        attention_mask = None, # Passed as attention_mask_input
+        max_len: int = 256, # Max sequence length for f() scaling function
+        ratio: float = 0.5, # Ratio for important tokens
+        is_profiling: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, None]:
 
-    def __init__(self, config: PretrainedConfig = None) -> None:
-      super().__init__()
-      self.config = config
-      self.prefill_len = 0
-      self.retained_key_cache: List[torch.Tensor] = []
-      self.retained_value_cache: List[torch.Tensor] = []
-      self.key_unit_cache: List[torch.Tensor] = []
-      self.value_unit_cache: List[torch.Tensor] = []
-      self.key_magnitude: List[torch.Tensor] = []
-      self.value_magnitude: List[torch.Tensor] = []
+        device, dtype = self._prepare_device_dtype_from_states(key_states)
 
-      self._seen_tokens = 0  # Used in `generate` to keep tally of how many tokens the cache has seen
-      self.mask_k = []
-      self.mask_v = []
+        if layer_idx == 0:
+            self._seen_tokens += key_states.shape[-2]
 
-      self.hidden_states = []
-      self.query_cache = []
-      self.decode_q = []
-      self.layer_map = []
-      self.indices = []
+        # Accumulate into temporary original full caches during prefill
+        if len(self._original_key_cache) <= layer_idx:
+            self._original_key_cache.append(key_states)
+            self._original_value_cache.append(value_states)
+        else:
+            self._original_key_cache[layer_idx] = torch.cat([self._original_key_cache[layer_idx], key_states], dim=-2)
+            self._original_value_cache[layer_idx] = torch.cat([self._original_value_cache[layer_idx], value_states], dim=-2)
+        
+        # Calculate and store query_cache for importance scoring
+        current_layer_accumulated_keys = self._original_key_cache[layer_idx]
+        if query_states is not None and query_states.shape[-2] >= self.window_size:
+            q_for_importance = query_states[:, :, -self.window_size:, :]
+            num_accumulated_keys = current_layer_accumulated_keys.shape[-2]
+            
+            if num_accumulated_keys > self.sink_size + self.window_size:
+                k_target_for_importance = current_layer_accumulated_keys[:, :, self.sink_size : num_accumulated_keys - self.window_size, :]
+                if k_target_for_importance.shape[-2] > 0: # Ensure middle section is not empty
+                    attn_logits = torch.matmul(q_for_importance, k_target_for_importance.transpose(2, 3)) / math.sqrt(q_for_importance.shape[-1])
+                    attn_weights = nn.functional.softmax(attn_logits, dim=-1, dtype=torch.float32).to(dtype)
+                    self.query_cache[layer_idx] = attn_weights.sum(dim=-2) # Sum over query head dimension: [B, H, S_middle]
+                elif self.query_cache[layer_idx] is None:
+                     self.query_cache[layer_idx] = torch.empty((key_states.shape[0], self.num_heads, 0), device=device, dtype=dtype)
+            elif self.query_cache[layer_idx] is None :
+                 self.query_cache[layer_idx] = torch.empty((key_states.shape[0], self.num_heads, 0), device=device, dtype=dtype)
+
+        # --- Profiling Mode (Generates layer_map_final.csv) ---
+        if is_profiling:
+            if layer_idx == self.num_hidden_layers - 1:
+                print("Starting profiling to generate layer_map_final.csv...")
+                # Placeholder for your detailed profiling logic.
+                # This logic calculates similarities between (Q_i, K_i) and (Q_j, K_j) patterns.
+                # It needs careful handling of which Q and K are used (raw queries vs. summed weights from query_cache).
+                # The output should be `profiling_results_map` list of tuples.
+                profiling_results_map = [] 
+                # Example dummy entry, replace with actual calculation
+                # if self.num_hidden_layers > 1 and self.num_heads > 1:
+                #    profiling_results_map.append((0,1,0,0,0,0.95, 0.8)) # (i,j,seg,hi,hj,sim,scale)
+
+                # --- Begin Your Profiling Logic Adapted ---
+                # This assumes self.query_cache (summed weights) and self._original_key_cache (full keys)
+                # are suitable for the similarity calculation defined in your original snippet.
+                # The original snippet used QK products. If self.query_cache holds Q_states for profiling:
+                # for i in range(self.num_hidden_layers):
+                #     # prev_segment = torch.matmul(Q_FOR_PROFILING[i], self._original_key_cache[i].transpose(2,3)) ...
+                # This part is highly specific to how profiling Qs are obtained.
+                # --- End Your Profiling Logic Adapted ---
+                
+                print(f"Generated {len(profiling_results_map)} potential reuse pairs before filtering.")
+                # Filtering logic (used_segment, replaced_segment)
+                final_map_for_csv = []
+                # ... (your filtering logic here based on used_segment, replaced_segment) ...
+                # For now, let's assume final_map_for_csv is populated by your logic.
+                final_map_for_csv = profiling_results_map # Without filtering for this placeholder
+
+                with open('layer_map_final.csv', 'w') as f:
+                    for item_map in final_map_for_csv:
+                        f.write(','.join([str(x) for x in item_map]) + '\n')
+                print("Profiling finished, layer_map_final.csv written. Exiting.")
+                exit(0)
+            return key_states, value_states, None # Standard return during profiling
+
+        # --- Cache Restructuring (End of Prefill, layer_idx == N-1, not profiling) ---
+        if layer_idx == self.num_hidden_layers - 1:
+            print("Restructuring KV cache for true reuse...")
+            # 1. Read layer_map_final.csv into self.layer_map
+            self.layer_map = {}
+            try:
+                with open('layer_map_final.csv', 'r') as f:
+                    for line in f:
+                        parts = line.strip().split(',')
+                        source_l, target_l, _, source_h, target_h, _, scale_val = (
+                            int(parts[0]), int(parts[1]), int(parts[2]),
+                            int(parts[3]), int(parts[4]),
+                            float(parts[5]), float(parts[6])
+                        )
+                        if target_l not in self.layer_map: self.layer_map[target_l] = {}
+                        self.layer_map[target_l][target_h] = (source_l, source_h, scale_val)
+            except FileNotFoundError:
+                print("Warning: layer_map_final.csv not found. No KV reuse will be configured.")
+
+            # 2. Attention-based Index Selection for ALL layers
+            f_scaled_size = lambda r, ml: int(ml / (10/32 + 22/32 * (r + 1) / 2)) # Your f()
+            
+            max_retained_core_tokens_layer = [0] * self.num_hidden_layers
+            max_unit_tokens_layer = [0] * self.num_hidden_layers
+
+            for i_layer in range(self.num_hidden_layers):
+                if self.query_cache[i_layer] is None or self._original_key_cache[i_layer] is None:
+                    self.indices_analysis_results[i_layer] = (
+                        torch.empty((key_states.shape[0], self.num_heads, 0), dtype=torch.long, device=device),
+                        torch.empty((key_states.shape[0], self.num_heads, 0), dtype=torch.long, device=device)
+                    )
+                    continue
+
+                attn_weights_sum = self.query_cache[i_layer] # [B, H, S_middle]
+                s_middle = attn_weights_sum.shape[-1]
+                
+                current_total_seq_len = self._original_key_cache[i_layer].shape[-2]
+                target_total_compressed_len = min(f_scaled_size(ratio, max_len), current_total_seq_len)
+                
+                num_middle_tokens_to_keep_overall = max(0, target_total_compressed_len - self.window_size - self.sink_size)
+                k_all = min(num_middle_tokens_to_keep_overall, s_middle)
+
+                if k_all <= 0:
+                    all_indices_rel = torch.empty((key_states.shape[0], self.num_heads, 0), dtype=torch.long, device=device)
+                else:
+                    all_indices_rel = attn_weights_sum.topk(k_all, dim=-1).indices # Relative to middle section
+
+                num_retained_core_total = int(target_total_compressed_len * ratio)
+                num_retained_core_middle = max(0, num_retained_core_total - self.window_size - self.sink_size)
+                k_most_important = min(num_retained_core_middle, k_all)
+
+                if k_most_important > 0 and k_all > 0:
+                    gathered_att_values = torch.gather(attn_weights_sum, -1, all_indices_rel)
+                    indices_within_all = gathered_att_values.topk(k_most_important, dim=-1).indices
+                    retained_core_indices_rel = torch.gather(all_indices_rel, -1, indices_within_all)
+                else:
+                    retained_core_indices_rel = torch.empty((key_states.shape[0], self.num_heads, 0), dtype=torch.long, device=device)
+                
+                # Unit indices (those in all_indices_rel but not retained_core_indices_rel)
+                # Using your original method for finding unit indices more directly:
+                if k_all > 0 :
+                    final_exp = retained_core_indices_rel.unsqueeze(-1) # B,H,K_core,1
+                    all_exp_u = all_indices_rel.unsqueeze(-2)      # B,H,1,K_all
+                    mask_u = (all_exp_u == final_exp).any(dim=-2)  # B,H,K_all (True if in core)
+                    
+                    # unit_indices_rel = all_indices_rel[~mask_u].reshape(key_states.shape[0], self.num_heads, -1) # This reshape is tricky
+                    # A robust way to implement the gather for variable numbers:
+                    bs_tmp, h_tmp, _ = all_indices_rel.shape
+                    unit_indices_list = []
+                    current_max_k_unit = 0
+                    for b_ in range(bs_tmp):
+                        for h_ in range(h_tmp):
+                            selected = all_indices_rel[b_,h_][~mask_u[b_,h_]]
+                            unit_indices_list.append(selected)
+                            current_max_k_unit = max(current_max_k_unit, selected.shape[0])
+                    
+                    padded_unit_indices = torch.zeros((bs_tmp, h_tmp, current_max_k_unit), dtype=torch.long, device=device)
+                    list_idx = 0
+                    for b_ in range(bs_tmp):
+                        for h_ in range(h_tmp):
+                            s = unit_indices_list[list_idx].shape[0]
+                            padded_unit_indices[b_,h_,:s] = unit_indices_list[list_idx]
+                            list_idx +=1
+                    unit_indices_rel = padded_unit_indices
+                else:
+                    unit_indices_rel = torch.empty((key_states.shape[0], self.num_heads, 0), dtype=torch.long, device=device)
+
+
+                self.indices_analysis_results[i_layer] = (unit_indices_rel + self.sink_size, retained_core_indices_rel + self.sink_size)
+                max_retained_core_tokens_layer[i_layer] = retained_core_indices_rel.shape[-1]
+                max_unit_tokens_layer[i_layer] = unit_indices_rel.shape[-1]
+
+            # 3. Populate Structured Caches (now producing [B,H,S_layer,D] tensors by padding)
+            for l_idx in range(self.num_hidden_layers):
+                if self._original_key_cache[l_idx] is None: continue
+
+                orig_k_layer = self._original_key_cache[l_idx] # B,H,S_orig,D
+                orig_v_layer = self._original_value_cache[l_idx] # B,H,S_orig,D
+                s_orig = orig_k_layer.shape[2]
+                bs, _, _, d_head = orig_k_layer.shape
+
+                unit_indices_abs, retained_core_indices_abs = self.indices_analysis_results[l_idx]
+                
+                # Determine padding lengths for this layer
+                num_sink = min(self.sink_size, s_orig)
+                num_window = min(self.window_size, s_orig - num_sink) # Window comes after sink
+                
+                # Max number of tokens selected by attention analysis for this layer
+                # These are already calculated: max_retained_core_tokens_layer[l_idx], max_unit_tokens_layer[l_idx]
+                # Total retained length for this layer: sink + window + padded_retained_core
+                s_retained_final_layer = num_sink + num_window + max_retained_core_tokens_layer[l_idx]
+                s_unit_final_layer = max_unit_tokens_layer[l_idx]
+
+                # Initialize final cache tensors for this layer
+                final_retained_k = torch.zeros((bs, self.num_heads, s_retained_final_layer, d_head), device=device, dtype=dtype)
+                final_retained_v = torch.zeros((bs, self.num_heads, s_retained_final_layer, d_head), device=device, dtype=dtype)
+                final_unit_k_tensor = torch.zeros((bs, self.num_heads, s_unit_final_layer, d_head), device=device, dtype=dtype)
+                final_unit_v_tensor = torch.zeros((bs, self.num_heads, s_unit_final_layer, d_head), device=device, dtype=dtype)
+                
+                is_layer_reused_unit_k = False # Flag if any head in this layer reuses unit_k
+
+                for h_idx in range(self.num_heads):
+                    # Absolute indices for this head
+                    h_unit_abs = unit_indices_abs[:, h_idx, :].clamp(0, s_orig - 1) # B, N_unit_head
+                    h_retained_core_abs = retained_core_indices_abs[:, h_idx, :].clamp(0, s_orig - 1) # B, N_core_head
+
+                    # Create combined retained indices for this head (sink + window + core)
+                    sink_idx_h = torch.arange(0, num_sink, device=device).unsqueeze(0).expand(bs, -1)
+                    win_idx_h = torch.arange(s_orig - num_window, s_orig, device=device).unsqueeze(0).expand(bs, -1)
+                    
+                    combined_retained_indices_h = torch.cat([sink_idx_h, win_idx_h, h_retained_core_abs], dim=-1).unique(dim=-1) # B, N_ret_combined_head
+                    
+                    # Pad combined_retained_indices_h to s_retained_final_layer before gather (if needed, but gather handles variable indices)
+                    # Pad the gathered K/V data before putting into final_retained_k/v
+
+                    # Gather for retained
+                    if combined_retained_indices_h.numel() > 0:
+                        gathered_k_ret = torch.gather(orig_k_layer[:,h_idx], 1, combined_retained_indices_h.unsqueeze(-1).expand(-1,-1,d_head))
+                        gathered_v_ret = torch.gather(orig_v_layer[:,h_idx], 1, combined_retained_indices_h.unsqueeze(-1).expand(-1,-1,d_head))
+                        final_retained_k[:, h_idx, :gathered_k_ret.shape[1], :] = gathered_k_ret
+                        final_retained_v[:, h_idx, :gathered_v_ret.shape[1], :] = gathered_v_ret
+                    
+                    # Handle unit_k: direct gather or mark for reuse
+                    if l_idx in self.layer_map and h_idx in self.layer_map[l_idx]:
+                        # This head reuses its unit_k. The layer's key_unit_cache will store a dict.
+                        is_layer_reused_unit_k = True 
+                        # No need to populate final_unit_k_tensor for this head if entire layer points to dict
+                    elif h_unit_abs.numel() > 0:
+                        gathered_k_unit = torch.gather(orig_k_layer[:,h_idx], 1, h_unit_abs.unsqueeze(-1).expand(-1,-1,d_head))
+                        final_unit_k_tensor[:, h_idx, :gathered_k_unit.shape[1], :] = gathered_k_unit
+                    
+                    # Unit_v always local
+                    if h_unit_abs.numel() > 0:
+                        gathered_v_unit = torch.gather(orig_v_layer[:,h_idx], 1, h_unit_abs.unsqueeze(-1).expand(-1,-1,d_head))
+                        final_unit_v_tensor[:, h_idx, :gathered_v_unit.shape[1], :] = gathered_v_unit
+
+                self.retained_key_cache[l_idx] = final_retained_k
+                self.retained_value_cache[l_idx] = final_retained_v
+                self.value_unit_cache[l_idx] = final_unit_v_tensor
+                
+                if is_layer_reused_unit_k:
+                    # If any head reuses, the layer's entry is a reference map for unit_k.
+                    # This implies that if one head reuses, all heads' unit_k in that layer are determined by reuse_map.
+                    # This is a simplification. A more granular approach would be per-head dict/tensor.
+                    # For now, if layer_map[l_idx] exists, self.key_unit_cache[l_idx] becomes a dict of that.
+                    # This means ALL heads in l_idx must follow reuse if any are specified.
+                    # A better structure: self.key_unit_cache[l_idx][h_idx] can be tensor or dict.
+                    # The current self.key_unit_cache is List[Tensor/Dict]. If it's Dict, it's for the whole layer.
+                    if l_idx in self.layer_map:
+                         self.key_unit_cache[l_idx] = self.layer_map[l_idx] # Store reuse info for WHOLE layer
+                    else: # Should not happen if is_layer_reused_unit_k is True
+                         self.key_unit_cache[l_idx] = final_unit_k_tensor
+                else:
+                    self.key_unit_cache[l_idx] = final_unit_k_tensor
+            
+            del self._original_key_cache
+            del self._original_value_cache
+            self.indices_analysis_results = [None] * self.num_hidden_layers # Clear temp list
+            torch.cuda.empty_cache()
+            print("Cache restructuring complete.")
+
+        return key_states, value_states, None # Return current K/V, not historical
+
+    def update_miniCache_decode(self,
+        key_states: torch.Tensor, # New K for current layer, current token: [B, H, 1, D]
+        value_states: torch.Tensor,
+        layer_idx: int,
+        num_layers: int, # Unused, use self.num_hidden_layers
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if layer_idx == 0:
+            self._seen_tokens += key_states.shape[-2] # Should be 1
+
+        # Append new K/V to the end of the existing retained cache for this layer
+        if self.retained_key_cache[layer_idx] is not None:
+            self.retained_key_cache[layer_idx] = torch.cat([self.retained_key_cache[layer_idx], key_states], dim=-2)
+            self.retained_value_cache[layer_idx] = torch.cat([self.retained_value_cache[layer_idx], value_states], dim=-2)
+        else:
+            # Should not happen if prefill occurred. Initialize if it's the first token ever.
+            self.retained_key_cache[layer_idx] = key_states
+            self.retained_value_cache[layer_idx] = value_states
+        
+        # The unit caches are static during decode after prefill restructuring.
+        return key_states, value_states, # Return current K/V
+
+    def get_retained_kv(self, layer_idx: int) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        return self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx]
+
+    def get_unit_kv(self, layer_idx: int) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        unit_k_entry = self.key_unit_cache[layer_idx]
+        unit_v_tensor = self.value_unit_cache[layer_idx]
+        
+        if isinstance(unit_k_entry, dict): # Reuse map for the whole layer
+            # All heads in this layer reuse their unit_k based on map
+            # Need to construct the full [B,H,S_unit,D] tensor
+            # Assume S_unit is consistent for all anchor sources for this layer's unit parts
+            # This part is complex if S_unit varies across anchors.
+            # For simplicity, assume the reuse dict applies uniformly or we fetch per head from anchor's unit tensor.
+            
+            # Let's assume anchors (source_l) have their unit_k as Tensors [B,H,S_anchor_unit,D]
+            # And the reuse map tells us for each target_h which (source_l, source_h, scale) to use.
+            
+            # Determine batch_size, num_heads, S_unit_target, head_dim
+            # S_unit_target should be max_unit_tokens_layer[layer_idx] from restructuring
+            # This info isn't directly stored. Need a way to know target S_unit.
+            # For now, let's assume the anchor's S_unit is what we use.
+            # This means the S_unit for the target layer might be variable if anchors have different S_units.
+            
+            # This requires a per-head construction for the unit_k if sources vary.
+            # A simpler model: if key_unit_cache[layer_idx] is a dict, it means ALL heads of this layer
+            # reuse from a single, common anchor layer (not per-head anchor). This is too simple.
+            
+            # Corrected logic: iterate target heads, get their anchor, fetch anchor's unit_k for that head, scale.
+            # Then stack these to form the final unit_k tensor for the target layer.
+            
+            bs, _, _, d_head = self.retained_key_cache[layer_idx].shape # Get dims
+            # What is S_unit for this layer? It was max_unit_tokens_layer[l_idx] during padding.
+            # This length info needs to be accessible, or inferred from anchors.
+            # Let's assume the length of the key_unit_cache of the *first* anchor head dictates S_unit for all.
+            
+            first_target_h = list(unit_k_entry.keys())[0]
+            anchor_l, anchor_h_first_anchor, scale_first = unit_k_entry[first_target_h]
+            
+            anchor_unit_k_tensor_for_first = self.key_unit_cache[anchor_l] # This MUST be a tensor [B,H,S_anchor,D]
+            if not isinstance(anchor_unit_k_tensor_for_first, torch.Tensor):
+                print(f"ERROR: Anchor layer {anchor_l} for unit_k reuse does not have a tensor unit_k.")
+                return None, unit_v_tensor # Or empty tensor
+
+            s_unit_target = anchor_unit_k_tensor_for_first.shape[2]
+            final_unit_k = torch.zeros((bs, self.num_heads, s_unit_target, d_head),
+                                       device=anchor_unit_k_tensor_for_first.device,
+                                       dtype=anchor_unit_k_tensor_for_first.dtype)
+
+            for target_h_idx, (anc_l, anc_h_idx, scale_val) in unit_k_entry.items():
+                anchor_layer_unit_k_tensor = self.key_unit_cache[anc_l] # [B,H,S_anchor_unit,D]
+                if isinstance(anchor_layer_unit_k_tensor, torch.Tensor) and \
+                   anchor_layer_unit_k_tensor.shape[2] == s_unit_target : # Ensure consistent S_unit from anchors
+                    final_unit_k[:, target_h_idx, :, :] = anchor_layer_unit_k_tensor[:, anc_h_idx, :, :] * scale_val
+                else:
+                    print(f"Warning: Mismatch or non-tensor anchor for unit_k head {target_h_idx} in layer {layer_idx}")
+            
+            return final_unit_k, unit_v_tensor
+            
+        else: # It's a tensor or None
+            return unit_k_entry, unit_v_tensor
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
         """
@@ -267,488 +611,7 @@ class DynamicCache(Cache):
         to the number of layers in the model.
         """
         return len(self.retained_key_cache)
-    def update(
-        self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        layer_idx: int,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
-        hidden_states: torch.Tensor = None, 
-        query_states: torch.Tensor = None, 
-        attention_mask = None,
-        max_len = 256,
-        ratio = 0.5,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
 
-        Parameters:
-            key_states (`torch.Tensor`):
-                The new key states to cache.
-            value_states (`torch.Tensor`):
-                The new value states to cache.
-            layer_idx (`int`):
-                The index of the layer to cache the states for.
-            cache_kwargs (`Dict[str, Any]`, `optional`):
-                Additional arguments for the cache subclass. No additional arguments are used in `DynamicCache`.
-            hidden_states (`torch.Tensor`, `optional`):
-                The hidden states for the layer `layer_idx`.
-
-        Return:
-            A tuple containing the updated key, value states and hidden states.
-        """
-        # Update the number of seen tokens
-        if layer_idx == 0:
-            self._seen_tokens += key_states.shape[-2]
-
-        # Update the cache
-        assert len(self.retained_key_cache) <= layer_idx
-        self.retained_key_cache.append(key_states)
-        self.retained_value_cache.append(value_states)
-        self.hidden_states.append(None)
-
-        sink_size = 8
-        window_size = 8
-        layer_map = []
-        query_states = query_states[:,:,-window_size:,:]
-
-        mask = torch.full((window_size, window_size), torch.finfo(key_states.dtype).min, device=key_states.device)
-        mask_cond = torch.arange(mask.size(-1), device=key_states.device)
-        mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
-        mask = mask.to(key_states.device)
-        attention_mask = mask[None, None, :, :]
-        def f(a,n=256):
-                 return int(n/(10/32+22/32*(a+1)/2))
-        ratio = ratio
-        # print('ratio:', ratio)
-        scaled_size = min(f(ratio,max_len),self.retained_key_cache[0].shape[2])
-        # scaled_size = 240
-        attn_lis = []
-        prev_segment = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-        prev_segment[:, :, -window_size:, -window_size:] += attention_mask
-        attn_weights = prev_segment
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(self.retained_key_cache[0].dtype)
-        attn_weights_sum_prev = attn_weights[:, :, -window_size:, sink_size:-window_size ].sum(dim = -2)
-        self.query_cache.append(attn_weights_sum_prev)
-
-        del query_states
-        torch.cuda.empty_cache()
-        
-
-        self.key_unit_cache.append(None)
-        self.value_unit_cache.append(None)
-        self.key_magnitude.append(None)
-        self.value_magnitude.append(None)
-        self.mask_k.append(None)
-        self.mask_v.append(None)
-
-        if False:
-            self.indices.append(None)
-            # if layer_idx == 31:
-            #     with open('layer_map_new.csv', 'r') as f:
-            #             first_line = f.readline()
-            #             num = int(first_line)
-            #             for line in f:
-            #                 isfirst = False
-            #                 layer_map.append([i for i in line.strip().split(',')])
-            #                 for i in range(5):
-            #                     layer_map[-1][i] = int(layer_map[-1][i])
-            #                 layer_map[-1][5] = float(layer_map[-1][5])
-            #                 layer_map[-1][6] = float(layer_map[-1][6])
-            layer_map = []
-            if layer_idx == 31:
-                for i in range(32):
-                    print(i)
-                    prev_segment = torch.matmul(self.query_cache[i], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                    p = prev_segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
-                    p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D
-                    for j in range(32):
-                        if i >= j:
-                            continue
-
-                        # Get query-key pairs for both layers 
-                        segment = torch.matmul(self.query_cache[j], self.retained_key_cache[j].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                        s = segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
-                        s_expanded = s.unsqueeze(0)  # [H_i, 1, S, D
- 
-                        cosine_sim = F.cosine_similarity(p_expanded, s_expanded, dim=-1)
-                        cosine_sim_avg = cosine_sim.mean(dim=-1)  # [H_i, H_j]
-                        # Find best matches for each head in layer i
-
-                        for head_i in range(cosine_sim_avg.size(0)):
-                            for head_j in range(cosine_sim_avg.size(1)):
-                                sim = cosine_sim_avg[head_i][head_j].item()
-
-
-                                # Calculate norm scaling for matched heads
-                                p_head = p[head_i]
-                                s_head = s[head_j]
-                                p_norm = p_head.norm(dim=-1)
-                                s_norm = s_head.norm(dim=-1)
-                                scaling = (s_norm / p_norm).mean().item() if p_norm != 0 else 0.0
-
-                                # Store matched pair information
-                                if sim < 0.9:
-                                    continue
-                                layer_map.append((i, j, 0, head_i, head_j, sim, scaling))
-
-                        # Cleanup
-                        del s,  s_expanded
-                    del p, p_expanded
-                layer_map.sort(key=lambda x:-x[-2])#from high to low
-                used_segment = set()
-                replaced_segment = set()
-                print(len(layer_map))
-                for item in layer_map:
-                    i, j, seg,hi,hj, _, s = item
-                    if len(replaced_segment)>= 22 * 32:
-                        print(len(used_segment),len(replaced_segment))
-                        break
-                    if (j,seg,hj) in used_segment or (j,seg,hj) in replaced_segment or (i,seg,hi) in replaced_segment:
-                        continue
-                    # if j <= 2:
-                    #     continue
-                    # print('sim',i,j,hi,hj,_,s)
-                    self.layer_map.append(item)
-                    print(len(self.layer_map),item)
-                    used_segment.add((i,seg,hi))
-                    replaced_segment.add((j,seg,hj))
-            if layer_idx == 31:
-                with open('layer_map_final.csv', 'w') as f:
-                    for item in self.layer_map:
-                        f.write(','.join([str(i) for i in item]) + '\n')
-                exit(0)
-            return self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], None
-                # with open('layer_map.csv', 'r') as f:
-                #     print('read')
-                #     layer_map = []
-                #     first_line = f.readline()
-                #     num = int(first_line)
-                #     for line in f:
-                #         isfirst = False
-                #         layer_map.append([i for i in line.strip().split(',')])
-                #         for i in range(5):
-                #             layer_map[-1][i] = int(layer_map[-1][i])
-                #         layer_map[-1][5] = float(layer_map[-1][5])
-                #         layer_map[-1][6] = float(layer_map[-1][6])
-                
-                # with open('layer_map.csv', 'w') as f:
-                #     print('write')
-                #     f.write(str(num+1) + '\n')
-                #     if len(layer_map)!=0:
-                #         for item, prev in zip(self.layer_map,layer_map):
-                #             temp = [str(i) for i in item]
-                #             temp[-1] = str((float(temp[-1]) + prev[-1]*num)/(num+1))
-                #             temp[-2] = str((float(temp[-2]) + prev[-2]*num)/(num+1))
-                #             f.write(','.join(temp) + '\n')
-                #     else:
-                #         for item in self.layer_map:
-                #             f.write(','.join([str(i) for i in item]) + '\n')
-
-
-            return ret_value[0], ret_value[1], ret_value[2]
-        if layer_idx == 31:
-            num_segments = 1
-            segment_size = self.retained_key_cache[0].shape[2] // num_segments
-            attn_diff = {}
-            
-            with open('layer_map_final.csv', 'r') as f:
-                layer_map = []
-                pair_map = {}
-                for i in range(32):
-                    pair_map[i] = []
-                for line in f:
-                    layer_map.append([i for i in line.strip().split(',')])
-                    for i in range(5):
-                        layer_map[-1][i] = int(layer_map[-1][i])
-                    layer_map[-1][5] = float(layer_map[-1][5])
-                    layer_map[-1][6] = float(layer_map[-1][6])
-                    temp = layer_map[-1]
-                    pair_map[temp[0]].append((temp[3], temp[1],temp[4]))
-
-            # for i in range(32):
-            #     prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-            #     prev_segment[:, :, -window_size:, -window_size:] += attention_mask
-            #     attn_weights = prev_segment
-            #     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(self.retained_key_cache[i].dtype)
-            #     attn_weights_sum_prev = attn_weights[:, :, -window_size:, sink_size:-window_size ].sum(dim = -2)
-            #     attn_lis.append(
-            #         attn_weights_sum_prev
-            #     )
-            attn_lis = self.query_cache
-            for i in range(32):
-                attn_diff[i] = None
-                # min_num = (256-16)//2
-                # max_num = 2*(256-16) - min_num
-
-                # steps = (max_num - min_num) / 31
-                # max_capacity_prompt = int(max_num - steps * i)
-                # scaled_size = max_capacity_prompt + 16
-                # scaled_size = 256
-                # ratio = 0.6
-                
-                
-                # def g(y,n=256):
-                #     return (n/y-10/32)*2*32/22-1
-                # prev_segment = torch.matmul(self.query_cache[i][:,:,-window_size:,:], self.retained_key_cache[i].transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
-                # # p = prev_segment[:, :, -window_size:, :-window_size][0]  # [num_heads, seq_len, dim]
-                # # p_expanded = p.unsqueeze(1)  # [H_i, 1, S, D]
-                # prev_segment[:, :, -window_size:, -window_size:] += attention_mask
-                # attn_weights = prev_segment
-                # attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(self.retained_key_cache[i].dtype)
-                # attn_weights_sum_prev = attn_weights[:, :, -window_size:, sink_size:-window_size ].sum(dim = -2)
-                attn_weights_sum_prev = attn_lis[i]
-                all_indices = (F.max_pool1d(attn_weights_sum_prev, kernel_size = 7, padding=7//2, stride=1)).topk((scaled_size-window_size-sink_size), dim=-1).indices #[1,h,10]
-
-
-                h, n, d = attn_weights_sum_prev.shape  # Get dimensions
-    
-                # Expand dimensions for broadcasting
-                # attn_weights_sum_prev: [h, n, d] -> [h, 1, n, d]
-                # attn_weights_sum_prev_expanded = attn_weights_sum_prev.unsqueeze(1)
-                
-                diff = attn_weights_sum_prev.clone()
-                counter = [1 for i in range(32)]
-                # for item in pair_map[i]:   
-                #     diff[:,item[0]:item[0]+1,:] += attn_lis[item[1]][:,item[2]:item[2]+1,:] * 0
-                #     counter[item[0]] += 1
-                # attn_diff[i] = diff-attn_weights_sum_prev
-                attn_diff[i] = diff
-                # for index in range(32):
-                #     if counter != 0:
-                #         attn_diff[i][:,index:index+1,:]/=counter[index]
-                # if counter != 0:
-                #     attn_diff[i]/=counter
-                # attn_diff[i] = attn_weights_sum_prev
-                
-                
-                # # Compute pairwise absolute differences
-                # # diffs: [h, h, n, d]
-                # diffs = torch.abs(attn_weights_sum_prev_expanded - attn_weights_sum_prev.unsqueeze(0))
-                
-                # # Sum the differences along the head dimension (dim=1)
-                # # result: [h, n, d]
-                # attn_diff[i] = torch.sum(diffs, dim=1)
-                
-
-                # attn_diff[i] = F.max_pool1d(attn_diff[i], kernel_size = 7, padding=7//2, stride=1)
-                selected_attn_diff =torch.gather(attn_diff[i], dim=-1, index=all_indices)
-                indices = selected_attn_diff.topk((int(scaled_size*ratio) - window_size - sink_size), dim=-1).indices
-                indices = torch.gather(all_indices, dim=-1, index=indices)
-
-                final_indices_expanded = indices.unsqueeze(-1)  # Shape: [batch, heads, k_final, 1]
-                all_indices_expanded = all_indices.unsqueeze(-2)      # Shape: [batch, heads, 1, k1]
-
-                # Compare to find matches
-                mask = (all_indices_expanded == final_indices_expanded).any(dim=-2)  # Shape: [batch, heads, k1]
-
-                # 2. Filter out the indices in all_indices that are present in final_indices
-                updated_all_indices = all_indices[~mask]  # Use the mask to exclude final_indices
-
-                # Reshape updated_all_indices to maintain the original shape (excluding the removed indices)
-                updated_all_indices = updated_all_indices.reshape(all_indices.shape[0], all_indices.shape[1], -1)
-                
-                self.indices.append((updated_all_indices + sink_size, indices + sink_size))
-        # if layer_idx == 31:
-        #     for i in attn_diff.keys():
-        #         print(i,attn_diff[i].mean())
-        if layer_idx == 31:
-            temp_key = [i.clone() for i in self.retained_key_cache]
-        # temp_value = [i.clone() for i in self.retained_value_cache]
-        # Collect all indices and values for batched updates
-        if layer_idx == 31:
-            sink_indices = torch.arange(0, sink_size, device=self.retained_key_cache[0].device)
-            window_indices = torch.arange(self.retained_key_cache[0].shape[-2] - window_size, self.retained_key_cache[0].shape[-2], device=self.retained_key_cache[0].device)
-            combined_indices = torch.cat([sink_indices, window_indices])
-            i_list, j_list, hi_list, hj_list, lis_list, _lis_list, scaling_list = [], [], [], [], [], [], []
-            for item in layer_map:
-                i, j, seg, hi, hj, _, s = item
-                self.layer_map.append(item)
-                i_list.append(i)
-                j_list.append(j)
-                hi_list.append(hi)
-                hj_list.append(hj)
-                lis_list.append(self.indices[j][1][0][hj])
-                _lis_list.append(self.indices[i][0][0][hi])
-                scaling_list.append(s)
-
-            # Convert lists to tensors
-            i_tensor = torch.tensor(i_list, device=self.retained_key_cache[0].device)
-            j_tensor = torch.tensor(j_list, device=self.retained_key_cache[0].device)
-            hi_tensor = torch.tensor(hi_list, device=self.retained_key_cache[0].device)
-            hj_tensor = torch.tensor(hj_list, device=self.retained_key_cache[0].device)
-            lis_tensor = lis_list
-            _lis_tensor = _lis_list
-            scaling_tensor =  torch.tensor(scaling_list, device=self.retained_key_cache[0].device)
-
-            # Perform batched updates
-            # Inside the batched updates loop where layer_map is processed
-            for idx, (i, j, hi, hj, lis, _lis, s) in enumerate(zip(i_tensor, j_tensor, hi_tensor, hj_tensor, lis_tensor, _lis_tensor, scaling_tensor)):
-                # Extract original heads from temporary clones
-                # p_head = temp_key[i][:, hi, _lis, :]  # [1, seq_len, dim]
-                # s_head = temp_key[j][:, hj, _lis, :]
-                
-                # # Calculate norms and scaling factor
-                # p_norm = p_head.norm(dim=-1).mean().item()
-                # s_norm = s_head.norm(dim=-1).mean().item()
-                # scaling = s_norm / p_norm 
-                
-                # Apply scaling to the source key from layer i
-                scaled_key = temp_key[i][:, hi, :, :] * s
-                
-                # Update retained key cache with scaled values
-                self.retained_key_cache[j][:, hj, :, :] = scaled_key
-                
-                # Preserve specific indices from original head
-                update_indices = torch.cat([combined_indices, lis])
-                self.retained_key_cache[j][:, hj, update_indices, :] = temp_key[j][:, hj, update_indices, :]
-                # self.retained_value_cache[j][:, hj, 128:-128, :] = temp_value[i][:, hi, 128:-128, :]
-                # self.retained_key_cache[j][:, :, -8:, :] = temp_key[j][:, :, -8:, :]
-                # self.retained_key_cache[j][:, :, :8, :] = temp_key[j][:, :, :8, :]
-                # self.retained_value_cache[j][:, :, -8:, :] = temp_value[i][:, :, -8:, :]
-        if layer_idx == 31:
-            device = self.retained_key_cache[0].device
-            
-            # Process each layer individually
-            for j in range(32):
-                # Get sequence length for this layer
-                seq_len = self.retained_key_cache[j].shape[-2]
-                
-                # Create combined indices for this layer
-                window_start = seq_len - window_size
-                window_indices = torch.arange(window_start, seq_len, device=device)
-                combined_indices = torch.cat([sink_indices, window_indices])
-                
-                # Get layer-specific indices
-                layer_indices_full = self.indices[j][1]  # [1, H, M]
-                layer_indices_compress = self.indices[j][0]  # [1, H, M_compress]
-                
-                # Combine with sink/window indices
-                combined_expanded = combined_indices.view(1, 1, -1).expand(1, layer_indices_full.size(1), -1)
-                all_indices = torch.cat([layer_indices_full, combined_expanded], dim=-1)
-                
-                # Gather indices
-                index_expanded = all_indices.unsqueeze(-1).expand(-1, -1, -1, self.retained_key_cache[j].size(-1))
-                selected_keys = torch.gather(self.retained_key_cache[j], 2, index_expanded)
-                selected_values = torch.gather(self.retained_value_cache[j], 2, index_expanded)
-                
-                # Gather compressed indices
-                compress_index_expanded = layer_indices_compress.unsqueeze(-1).expand(-1, -1, -1, self.retained_key_cache[j].size(-1))
-                unselected_keys = torch.gather(self.retained_key_cache[j], 2, compress_index_expanded)
-                unselected_values = torch.gather(self.retained_value_cache[j], 2, compress_index_expanded)
-                
-                # Update caches for this layer
-                self.key_unit_cache[j] = unselected_keys
-                self.value_unit_cache[j] = unselected_values
-                self.retained_key_cache[j] = selected_keys
-                self.retained_value_cache[j] = selected_values
-                self.indices[j] = None
-            # item in self.layer_map is (i, j, seg, hi, hj, sim, scaling)
-            # now we cast layer map to a dict with (j,hj) as key and (i,hi) as value.
-            # Convert layer_map to a nested dictionary for per-layer storage
-            layer_map = {}
-            for _ in range(32):
-                layer_map[_]={}
-            for item in self.layer_map:
-                i, j, seg, hi, hj, _, s = item
-                if j not in layer_map:
-                    layer_map[j] = {}  # Create a new dict for layer j
-                layer_map[j][hj] = (i, hi)  # Store mapping per head
-
-            self.layer_map = layer_map
-            
-            # delete all temporary variables only keep the final key and value caches
-            del temp_key, self.query_cache, attn_lis, attn_diff
-            torch.cuda.empty_cache()
-
-        # layer_map.sort(key=lambda x:-x[-2])#from high to low
-
-        ret_value = (self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx], None)
-       
-        return ret_value[0], ret_value[1], ret_value[2]
-    def update_miniCache(
-            self,
-            key_states: torch.Tensor,
-            value_states: torch.Tensor,
-            unit_key_states: torch.Tensor,
-            unit_value_states: torch.Tensor,
-            key_magnitude: torch.Tensor,
-            value_magnitude: torch.Tensor,
-            mask_k,
-            mask_v,
-            previous_key_states: torch.Tensor,
-            previous_value_states: torch.Tensor,
-            layer_idx: int,   
-            num_layers: int,   
-    ):
-        """
-        Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx` and the previous `key_states` and `value_states`.
-        """
-
-        if layer_idx < num_layers//4:
-            self.key_unit_cache.append(None)
-            self.value_unit_cache.append(None)
-            self.key_magnitude.append(None)
-            self.value_magnitude.append(None)
-            self.mask_k.append(None)
-            self.mask_v.append(None)
-            return None
-             
-        if layer_idx % 2 == 1:
-            # print('unit prefill:', layer_idx, unit_key_states)
-            self.key_unit_cache.append(unit_key_states)
-            self.value_unit_cache.append(unit_value_states)
-            self.key_magnitude.append(key_magnitude)
-            self.value_magnitude.append(value_magnitude)
-            self.mask_k.append(mask_k)
-            self.mask_v.append(mask_v)
-
-            self.key_unit_cache.append(None)
-            self.value_unit_cache.append(None)
-            self.key_magnitude.append(None)
-            self.value_magnitude.append(None)
-            self.mask_k.append(None)
-            self.mask_v.append(None)
-
-            self.retained_key_cache[layer_idx] = key_states
-            self.retained_value_cache[layer_idx] = value_states
-
-            self.retained_key_cache[layer_idx-1] = previous_key_states
-            self.retained_value_cache[layer_idx-1] = previous_value_states
-
-    def update_miniCache_decode(self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        layer_idx: int,
-        num_layers: int,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx` , also restore the kv cache for previous tokens.
-        """
-        # Update the number of seen tokens
-        if layer_idx == 0:
-            self._seen_tokens += key_states.shape[-2]
-
-        # Update the cache
-        assert len(self.retained_key_cache) > layer_idx
-        # print(self.retained_key_cache[layer_idx].shape, key_states.shape)
-
-        # for item in self.layer_map:
-        #         # print(item, len(past_key_value.decode_q)-1)
-        #         if layer_idx == item[1]:
-        #             # print(query_states.shape)
-        #             key_states[:,item[3],:,:] = self.retained_key_cache[item[0]][:,item[3],-1,:]
-
-
-       
-        self.retained_key_cache[layer_idx] = torch.cat([self.retained_key_cache[layer_idx], key_states], dim=-2)
-        self.retained_value_cache[layer_idx] = torch.cat([self.retained_value_cache[layer_idx], value_states], dim=-2)
-
-
-
-        return self.retained_key_cache[layer_idx], self.retained_value_cache[layer_idx]
- 
      
     @classmethod
     def from_legacy_cache(cls, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None) -> "MiniCache":
