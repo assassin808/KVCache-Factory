@@ -9,9 +9,16 @@ from tqdm import tqdm
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-datasets = ["narrativeqa", "qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "musique", \
-            "gov_report", "qmsum", "multi_news", "trec", "triviaqa", "samsum", \
-            "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
+datasets = [ "passage_retrieval_en","narrativeqa","qasper", "multifieldqa_en",  "hotpotqa", "2wikimqa", "musique", "passage_count", 
+    "trec",
+    "triviaqa",
+    "repobench-p", 
+    "lcc",
+    "gov_report",
+    "qmsum",
+    "samsum",
+    "multi_news"
+]
 
 dataset2maxlen = {
     "narrativeqa": 128,
@@ -75,8 +82,8 @@ model2prompt = {
 model2maxlen = {
     "llama2": 3950,
     "llama-2": 3950,
-    "llama3": 7950,
-    "llama-3": 7950,
+    "llama3": 16000,
+    "llama-3": 16000,
     "mistral": 31500
 }
 
@@ -129,7 +136,7 @@ def main(args):
             model_max_len = model2maxlen[key]
             
 
-    
+    print(args.dataset)
     output_max_len = dataset2maxlen[args.dataset]
     
     with open(args.data_file) as fp:
@@ -217,7 +224,7 @@ def main(args):
         
         
         if args.method != "FullKV":
-            if args.method.lower() in ["snapkv","pyramidkv","h2o","cam", "l2norm", "adakv", "headkv", "think"]:
+            if args.method.lower() in ["snapkv","pyramidkv","h2o","cam", "l2norm", "adakv", "headkv", "think", "minicache"]:
                 window_sizes = 8
             elif args.method.lower() in ["streamingllm", 'grouphead']:
                 window_sizes = max_capacity_prompts - 4
@@ -276,7 +283,6 @@ def main(args):
                 model.model.layers[i].self_attn.config.floor = args.floor
                 model.model.layers[i].self_attn.config.ratio = ratio[i]
                 model.model.layers[i].self_attn.config.recent_size = recent_size[i]
-            
 
         context_length = batch_input_ids.shape[-1]
         if args.quant_method == None:        
@@ -368,7 +374,7 @@ if __name__ == "__main__":
     parser.add_argument('--head_path', type=str, default='./data/heads_score/Meta-Llama-3-8B-Instruct_retrieval_reasoning_heads.json', help='Path to head score (HeadKV)')
     parser.add_argument('--head_beta', type=float, default=1.01, help='hyper-parameter used on HeadKV')
     parser.add_argument("--recent_size", type=int, default=32, help="")
-    parser.add_argument("--pruning_ratio", type=float, default=0.4, help="pruning ratio of Key Cache")
+    parser.add_argument("--pruning_ratio", type=float, default=0.5, help="pruning ratio of Key Cache")
 
     parser.add_argument(
         "--use_chat_format", 
@@ -423,9 +429,14 @@ if __name__ == "__main__":
     
         
     max_capacity_prompts = args.max_capacity_prompts
-    
+    if args.dataset=='':
+        args.dataset=datasets
+    filtered_dataset = args.dataset.split(',')
+    print(filtered_dataset)
     for idx, dataset in enumerate(datasets):
-        
+        if dataset not in filtered_dataset:
+            continue
+
         print(f"Working on max_capacity_prompts {args.max_capacity_prompts} dataset {dataset} - {idx}/{len(datasets)}")
         
         args.dataset = dataset

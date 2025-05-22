@@ -211,10 +211,10 @@ class PyramidKVCluster():
             min_num = (self.max_capacity_prompt - self.window_size) * 2 - max_num
     
        
-        steps = (max_num - min_num) // (self.num_hidden_layers - 1)
-        max_capacity_prompt = max_num - self.layer_idx * steps
-        
-        print(f"PyramidKV max_capacity_prompt {max_capacity_prompt}")
+        steps = (max_num - min_num) / (self.num_hidden_layers - 1)
+        max_capacity_prompt = max_num - int(self.layer_idx * steps)
+        # print(self.kernel_size,self.pooling,self.window_size)
+        # print(f"PyramidKV max_capacity_prompt {max_capacity_prompt}")
         if q_len < self.max_capacity_prompt:
             return key_states, value_states
         elif q_len < (self.max_capacity_prompt - self.window_size) * 2:
@@ -287,11 +287,12 @@ class SnapKVCluster():
         self.window_size = window_size
         self.max_capacity_prompt = max_capacity_prompt
         assert self.max_capacity_prompt - self.window_size > 0
-        self.kernel_size = kernel_size
+        self.kernel_size = kernel_size 
         self.pooling = pooling
         self.merge = merge
         self.recent_size = recent_size
         self.ratio = ratio
+        # print(pooling,kernel_size)
 
     def reset(self, window_size = 64, max_capacity_prompt = 256 + 64, kernel_size = 5, pooling = 'avgpool', merge = None):
         self.window_size = window_size
@@ -309,7 +310,8 @@ class SnapKVCluster():
         assert key_states.shape[-2] == query_states.shape[-2]
         bsz, num_heads, q_len, head_dim = query_states.shape
         
-        print(f"SnapKV max_capacity_prompt {self.max_capacity_prompt}")
+        # print(f"SnapKV max_capacity_prompt {self.max_capacity_prompt}, {self.window_size}")
+        # print(f"SnapKV max_capacity_prompt {self.max_capacity_prompt}")
         
         if q_len < self.max_capacity_prompt:
             return key_states, value_states
@@ -322,7 +324,6 @@ class SnapKVCluster():
             attention_mask = mask[None, None, :, :]
 
             attn_weights[:, :, -self.window_size:, -self.window_size:] += attention_mask
-
             attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
             attn_weights_sum = attn_weights[:, :, -self.window_size:, : -self.window_size].sum(dim = -2)
             if self.pooling == 'avgpool':
@@ -619,6 +620,115 @@ class CAMKVCluster:
 
             return key_states, value_states
 
+class MiniCacheKVCluster:
+    def __init__(self, compression_ratio, num_layers):
+        self.compression_ratio = compression_ratio
+        self.num_layers = num_layers
+
+    def reset(self, compression_ratio, num_layers):
+        self.compression_ratio = compression_ratio
+        self.num_layers = num_layers
+
+
+    def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups, layer_idx, previous_key_states, previous_value_states, hidden_states, previous_hidden_states):
+        
+        # check if prefix phase
+        assert key_states.shape[-2] == query_states.shape[-2]
+        bsz, num_heads, q_len, head_dim = query_states.shape
+        
+        # print(f"miniCache compression_ratio {self.compression_ratio}")
+
+        if layer_idx < self.num_layers//4:
+            return key_states, value_states, None, None, None, None, None, None, previous_key_states, previous_value_states
+        
+
+        else:
+            bsz, num_heads, seq_len, head_dim = key_states.shape
+            N = seq_len #* num_heads
+            n = int(4 * N * (1 - self.compression_ratio))
+            if layer_idx == self.num_layers - 1:
+                n = 0
+
+            if layer_idx % 2 == 1:
+                # 1. Calculate unit vectors (unit_k, unit_v) using ALL key and value states:
+
+                # Calculate magnitudes for all k, v, prev_k, prev_v
+                mag_k = torch.norm(key_states, dim=-1)
+                mag_km1 = torch.norm(previous_key_states, dim=-1)
+                mag_v = torch.norm(value_states, dim=-1)
+                mag_vm1 = torch.norm(previous_value_states, dim=-1)
+                # print('cluster:',  mag_k.shape)
+
+                # Calculate unit vectors for all k, v, prev_k, prev_v
+                e_k_l = key_states / mag_k.unsqueeze(-1)
+                e_v_l = value_states / mag_v.unsqueeze(-1)
+                e_k_lm1 = previous_key_states / mag_km1.unsqueeze(-1)
+                e_v_lm1 = previous_value_states / mag_vm1.unsqueeze(-1)
+
+                k_similarity = torch.einsum("bhsd,bhsd->bhs", e_k_l, e_k_lm1)
+                v_similarity = torch.einsum("bhsd,bhsd->bhs", e_v_l, e_v_lm1)
+                angle_k = torch.acos(k_similarity).unsqueeze(-1)
+                angle_v = torch.acos(v_similarity).unsqueeze(-1)
+                # k_similarity = torch.einsum("bhsd,bhsd->bhs", key_states, previous_key_states)
+                # v_similarity = torch.einsum("bhsd,bhsd->bhs", value_states, previous_value_states)
+
+                # print(hidden_states.shape)
+                hidden_similarity = torch.einsum("bsd,bsd->bs", hidden_states, previous_hidden_states)
+
+                
+                # hidden_similarity is now of shape [1, n]
+                # the k cache is of shape [1,32,n,128]
+                # the v cache is of shape [1,32,n,128]
+                # the mask should be of shape [1,32,n]
+                # Use hidden states similarity to select key and value cache
+                # so if the hidden state of a token is high, we selected the key cache and value cache of that token for all heads
+
+                hidden_similarity = hidden_similarity.unsqueeze(1).repeat(1, 32, 1)
+                # print(hidden_similarity.shape)
+
+
+
+                # Calculate unit_k and unit_v using all elements, using SLERP:
+                unit_k = torch.sin(angle_k*0.6)/torch.sin(angle_k) * e_k_l + torch.sin(angle_k*0.4)/torch.sin(angle_k) * e_k_lm1
+                unit_v = torch.sin(angle_v*0.6)/torch.sin(angle_v) * e_v_l + torch.sin(angle_v*0.4)/torch.sin(angle_v) * e_v_lm1
+
+                # 2. Calculate similarity and multiply with attention score to get top_n_indices:
+
+                # avg_attn_weights = torch.mean(attn_weights, dim=-1)
+                _, top_n_indices_k = torch.topk(-hidden_similarity , n, dim=-1)  # These are indices of most SIMILAR items
+                
+                _, top_n_indices_v = torch.topk(-hidden_similarity , n, dim=-1)  # These are indices of most SIMILAR items
+
+                # 3. Create the mask based on top_n_indices:
+                mask_k = torch.ones(bsz, num_heads, seq_len, dtype=torch.bool, device=key_states.device)
+                mask_v = torch.ones(bsz, num_heads, seq_len, dtype=torch.bool, device=key_states.device)
+                mask_k = mask_k.scatter(2, top_n_indices_k, 0)  # Set the top_n_indices to False (0)False
+                mask_v = mask_v.scatter(2, top_n_indices_v, 0)  # Set the top_n_indices to False (0)False
+                # 4. Group only the UNSELECTED elements:
+                
+                #   - Invert the mask to select the unselected elements.
+                #   - Use masked_select to get a flattened view of the unselected elements.
+                #   - Reshape the flattened view to group the unselected elements together.
+                
+                unselected_k = key_states.masked_select(mask_k.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
+                unselected_v = value_states.masked_select(mask_v.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
+                unselected_km1 = previous_key_states.masked_select(mask_k.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
+                unselected_vm1 = previous_value_states.masked_select(mask_v.unsqueeze(-1)).view(bsz, num_heads, -1, head_dim)
+                # print('cluster',layer_idx,unselected_k.shape)
+
+                mag_k_cat = torch.cat((mag_k, mag_km1), dim=0)
+                mag_v_cat = torch.cat((mag_v, mag_vm1), dim=0)
+
+                # 5. Return the necessary values:
+                return unselected_k, unselected_v, unit_k, unit_v, mag_k_cat, mag_v_cat, mask_k, mask_v,  unselected_km1, unselected_vm1
+            else:
+                return None, None, None, None, None, None, None, None, None, None
+
+
+                
+
+
+
 
 class H2OKVCluster():
     def __init__(self, window_size = 64, max_capacity_prompt = 256 + 64, kernel_size = 5, pooling = 'avgpool', merge = None):
@@ -643,7 +753,7 @@ class H2OKVCluster():
         assert key_states.shape[-2] == query_states.shape[-2]
         bsz, num_heads, q_len, head_dim = query_states.shape
         
-        print(f"H2O max_capacity_prompt {self.max_capacity_prompt}")
+        print(f"H2O max_capacity_prompt {self.max_capacity_prompt},", self.window_size)
         
         if q_len < self.max_capacity_prompt:
             return key_states, value_states
@@ -659,12 +769,12 @@ class H2OKVCluster():
 
             attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
             attn_weights_sum = attn_weights[:, :, :, : -self.window_size].sum(dim = -2)
-            # if self.pooling == 'avgpool':
-            #     attn_cache = F.avg_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
-            # elif self.pooling == 'maxpool':
-            #     attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
-            # else:
-            #     raise ValueError('Pooling method not supported')
+            if self.pooling == 'avgpool':
+                attn_cache = F.avg_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+            elif self.pooling == 'maxpool':
+                attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+            else:
+                raise ValueError('Pooling method not supported')
             attn_cache = attn_weights_sum
             indices = attn_cache.topk(self.max_capacity_prompt - self.window_size, dim=-1).indices
             indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
@@ -679,6 +789,7 @@ class H2OKVCluster():
             v_cur = value_states[:, :, -self.window_size:, :]
             key_states = torch.cat([k_past_compress, k_cur], dim = 2)
             value_states = torch.cat([v_past_compress, v_cur], dim = 2)
+            
             return key_states, value_states
 
 
@@ -1020,6 +1131,8 @@ def init_snapkv(self):
             self.config.pooling = 'avgpool'
         if not hasattr(self.config, 'merge'):
             self.config.merge = None
+        if not hasattr(self.config, 'ratio'):
+            self.config.ratio = 0.5
     
     
     self.kv_cluster = SnapKVCluster( 
@@ -1028,6 +1141,7 @@ def init_snapkv(self):
         kernel_size = self.config.kernel_size,
         pooling = self.config.pooling,
         merge = self.config.merge,
+        ratio = self.config.ratio,
         )
 
 def init_groupheadkv(self):
@@ -1097,6 +1211,25 @@ def init_l2norm(self):
         layer_idx = self.layer_idx,
         skip_layers = self.config.skip_layers
     )
+
+def init_MiniCacheKV(self, num_hidden_layers):
+    if not hasattr(self, "kv_cluster"):
+        if not hasattr(self.config, 'window_size'):
+            self.config.window_size = 32
+        if not hasattr(self.config, 'max_capacity_prompt'):
+            self.config.max_capacity_prompt = 2048
+        if not hasattr(self.config, 'kernel_size'):
+            self.config.kernel_size = 5
+        if not hasattr(self.config, 'pooling'):
+            self.config.pooling = 'avgpool'
+        if not hasattr(self.config, 'merge'):
+            self.config.merge = None
+
+    
+    self.kv_cluster = MiniCacheKVCluster(
+         compression_ratio=0.8,
+         num_layers = num_hidden_layers,
+        )
 
 def init_CAM(self):
     if not hasattr(self, "kv_cluster"):
