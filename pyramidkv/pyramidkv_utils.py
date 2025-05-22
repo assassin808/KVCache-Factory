@@ -770,12 +770,12 @@ class H2OKVCluster():
 
             attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
             attn_weights_sum = attn_weights[:, :, :, : -self.window_size].sum(dim = -2)
-            # if self.pooling == 'avgpool':
-            #     attn_cache = F.avg_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
-            # elif self.pooling == 'maxpool':
-            #     attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
-            # else:
-            #     raise ValueError('Pooling method not supported')
+            if self.pooling == 'avgpool':
+                attn_cache = F.avg_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+            elif self.pooling == 'maxpool':
+                attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+            else:
+                raise ValueError('Pooling method not supported')
             attn_cache = attn_weights_sum
             indices = attn_cache.topk(self.max_capacity_prompt - self.window_size, dim=-1).indices
             indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
@@ -790,6 +790,7 @@ class H2OKVCluster():
             v_cur = value_states[:, :, -self.window_size:, :]
             key_states = torch.cat([k_past_compress, k_cur], dim = 2)
             value_states = torch.cat([v_past_compress, v_cur], dim = 2)
+            
             return key_states, value_states
 
 
@@ -1131,6 +1132,8 @@ def init_snapkv(self):
             self.config.pooling = 'avgpool'
         if not hasattr(self.config, 'merge'):
             self.config.merge = None
+        if not hasattr(self.config, 'ratio'):
+            self.config.ratio = 0.5
     
     
     self.kv_cluster = SnapKVCluster( 
@@ -1139,6 +1142,7 @@ def init_snapkv(self):
         kernel_size = self.config.kernel_size,
         pooling = self.config.pooling,
         merge = self.config.merge,
+        ratio = self.config.ratio,
         )
 
 def init_groupheadkv(self):

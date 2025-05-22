@@ -633,7 +633,7 @@ def mistral_flash_attn2_forward_MiniCache(
         if key_states.shape[-2] >= kv_seq_len: # [SnapKV] add kv_cluster
             self.kv_seq_len = kv_seq_len # [SnapKV] register kv_seq_len
             self.prefill_len = kv_seq_len
-            _, _, _ = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs, None, query_states, attention_mask, self.kv_cluster.max_capacity_prompt)
+            _, _, _ = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs, hidden_states, query_states, attention_mask, self.kv_cluster.max_capacity_prompt, self.kv_cluster.ratio)
             
             # print(f"debug key_states.shape[-2] {key_states_compress.shape[-2]} value_states_compress.shape {value_states_compress.shape[-2]}")
         else:
@@ -650,9 +650,9 @@ def mistral_flash_attn2_forward_MiniCache(
             if len(past_key_value.decode_q) == 32:
                 past_key_value.decode_q.clear()
         past_key_value._seen_tokens=self.kv_seq_len
-    
-        # key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
+
+        # key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
         if past_key_value is not None and key_states.shape[-2] != self.prefill_len:
             selected_keys = past_key_value.retained_key_cache[self.layer_idx]
             selected_values = past_key_value.retained_value_cache[self.layer_idx]
@@ -675,7 +675,7 @@ def mistral_flash_attn2_forward_MiniCache(
             gate = 1 / (
                 torch.exp(sum_exp_distal - sum_exp_proximal) + 1
             )
-
+            
 
             gate = torch.nan_to_num(gate, 1.0)
             

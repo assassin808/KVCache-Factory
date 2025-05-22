@@ -277,6 +277,7 @@ class DynamicCache(Cache):
         query_states: torch.Tensor = None, 
         attention_mask = None,
         max_len = 256,
+        ratio = 0.5,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
@@ -317,11 +318,11 @@ class DynamicCache(Cache):
         mask = mask.to(key_states.device)
         attention_mask = mask[None, None, :, :]
         def f(a,n=256):
-                return int(n/(10/32+22/32*(a+1)/2))
-        ratio = 0.5
+                 return int(n/(10/32+22/32*(a+1)/2))
+        ratio = ratio
+        # print('ratio:', ratio)
         scaled_size = min(f(ratio,max_len),self.retained_key_cache[0].shape[2])
-        
-
+        # scaled_size = 240
         attn_lis = []
         prev_segment = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.retained_key_cache[0].shape[-1])
         prev_segment[:, :, -window_size:, -window_size:] += attention_mask
@@ -508,9 +509,9 @@ class DynamicCache(Cache):
                 
                 diff = attn_weights_sum_prev.clone()
                 counter = [1 for i in range(32)]
-                for item in pair_map[i]:   
-                    diff[:,item[0]:item[0]+1,:] += attn_lis[item[1]][:,item[2]:item[2]+1,:] * 0
-                    counter[item[0]] += 1
+                # for item in pair_map[i]:   
+                #     diff[:,item[0]:item[0]+1,:] += attn_lis[item[1]][:,item[2]:item[2]+1,:] * 0
+                #     counter[item[0]] += 1
                 # attn_diff[i] = diff-attn_weights_sum_prev
                 attn_diff[i] = diff
                 # for index in range(32):
@@ -657,7 +658,7 @@ class DynamicCache(Cache):
             self.layer_map = layer_map
             
             # delete all temporary variables only keep the final key and value caches
-            del temp_key, self.query_cache
+            del temp_key, self.query_cache, attn_lis, attn_diff
             torch.cuda.empty_cache()
 
         # layer_map.sort(key=lambda x:-x[-2])#from high to low

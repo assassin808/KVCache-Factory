@@ -1,0 +1,193 @@
+Using MiniCache!
+Using MiniCache!
+['samsum', 'lcc']
+Working on max_capacity_prompts 512 dataset lcc - 11/16
+Loading data...
+lcc
+Max Length is 10029
+Finish loading model and tokenizer
+Working on max_capacity_prompts 512 dataset samsum - 14/16
+Loading data...
+samsum
+Max Length is 12252
+Finish loading model and tokenizer
+Using MiniCache!
+Using MiniCache!
+['gov_report', 'qmsum', 'multi_news', 'samsum', 'lcc']
+Working on max_capacity_prompts 1024 dataset lcc - 11/16
+Loading data...
+lcc
+Max Length is 10029
+Finish loading model and tokenizer
+Working on max_capacity_prompts 1024 dataset gov_report - 12/16
+Loading data...
+gov_report
+Max Length is 40508
+Finish loading model and tokenizer
+Working on max_capacity_prompts 1024 dataset qmsum - 13/16
+Loading data...
+qmsum
+Max Length is 24585
+Finish loading model and tokenizer
+Working on max_capacity_prompts 1024 dataset samsum - 14/16
+Loading data...
+samsum
+Max Length is 12252
+Finish loading model and tokenizer
+Working on max_capacity_prompts 1024 dataset multi_news - 15/16
+Loading data...
+multi_news
+Max Length is 10933
+Finish loading model and tokenizer
+Using MiniCache!
+Using MiniCache!
+['gov_report', 'qmsum', 'multi_news', 'samsum', 'lcc']
+Working on max_capacity_prompts 2048 dataset lcc - 11/16
+Loading data...
+lcc
+Max Length is 10029
+Finish loading model and tokenizer
+Working on max_capacity_prompts 2048 dataset gov_report - 12/16
+Loading data...
+gov_report
+Max Length is 40508
+Finish loading model and tokenizer
+Working on max_capacity_prompts 2048 dataset qmsum - 13/16
+Loading data...
+qmsum
+Max Length is 24585
+Finish loading model and tokenizer
+Working on max_capacity_prompts 2048 dataset samsum - 14/16
+Loading data...
+samsum
+Max Length is 12252
+Finish loading model and tokenizer
+Working on max_capacity_prompts 2048 dataset multi_news - 15/16
+Loading data...
+multi_news
+Max Length is 10933
+Finish loading model and tokenizer
+Using MiniCache!
+Using MiniCache!
+['qmsum', 'multi_news', 'samsum', 'lcc']
+Working on max_capacity_prompts 256 dataset lcc - 11/16
+Loading data...
+lcc
+Max Length is 10029
+Finish loading model and tokenizer
+Working on max_capacity_prompts 256 dataset qmsum - 13/16
+Loading data...
+qmsum
+Max Length is 24585
+Finish loading model and tokenizer
+Working on max_capacity_prompts 256 dataset samsum - 14/16
+Loading data...
+samsum
+Max Length is 12252
+Finish loading model and tokenizer
+Working on max_capacity_prompts 256 dataset multi_news - 15/16
+Loading data...
+multi_news
+Max Length is 10933
+Finish loading model and tokenizer
+Using MiniCache!
+Using MiniCache!
+['narrativeqa', 'qasper', 'multifieldqa_en', 'hotpotqa', '2wikimqa', 'musique', 'multi_news', 'trec', 'triviaqa', 'samsum', 'passage_count', 'passage_retrieval_en', 'lcc', 'repobench-p']
+Working on max_capacity_prompts 256 dataset passage_retrieval_en - 0/16
+Loading data...
+passage_retrieval_en
+Max Length is 11516
+Finish loading model and tokenizer
+Working on max_capacity_prompts 256 dataset narrativeqa - 1/16
+Loading data...
+narrativeqa
+Max Length is 36418
+Finish loading model and tokenizer
+Working on max_capacity_prompts 256 dataset qasper - 2/16
+Loading data...
+qasper
+Max Length is 14660
+Finish loading model and tokenizer
+Working on max_capacity_prompts 256 dataset multifieldqa_en - 3/16
+Loading data...
+multifieldqa_en
+Max Length is 10337
+Finish loading model and tokenizer
+Working on max_capacity_prompts 256 dataset hotpotqa - 4/16
+Loading data...
+hotpotqa
+Max Length is 12697
+Finish loading model and tokenizer
+Working on max_capacity_prompts 256 dataset 2wikimqa - 5/16
+Loading data...
+2wikimqa
+Max Length is 11950
+Finish loading model and tokenizer
+Working on max_capacity_prompts 256 dataset musique - 6/16
+Loading data...
+musique
+Max Length is 17355
+Finish loading model and tokenizer
+Working on max_capacity_prompts 256 dataset passage_count - 7/16
+Loading data...
+passage_count
+Max Length is 22099
+Finish loading model and tokenizer
+Working on max_capacity_prompts 256 dataset trec - 8/16
+Loading data...
+trec
+Max Length is 8714
+Finish loading model and tokenizer
+Working on max_capacity_prompts 256 dataset triviaqa - 9/16
+Loading data...
+triviaqa
+Max Length is 16633
+Finish loading model and tokenizer
+Working on max_capacity_prompts 256 dataset repobench-p - 10/16
+Loading data...
+repobench-p
+Max Length is 18754
+Finish loading model and tokenizer
+Working on max_capacity_prompts 256 dataset lcc - 11/16
+Loading data...
+lcc
+Max Length is 10029
+Finish loading model and tokenizer
+Working on max_capacity_prompts 256 dataset samsum - 14/16
+Loading data...
+samsum
+Max Length is 12252
+Finish loading model and tokenizer
+Working on max_capacity_prompts 256 dataset multi_news - 15/16
+Loading data...
+multi_news
+Max Length is 10933
+Finish loading model and tokenizer
+Using MiniCache!
+Using MiniCache!
+['narrativeqa', 'qasper', 'multifieldqa_en', 'hotpotqa', '2wikimqa', 'musique', 'trec', 'triviaqa', 'passage_count', 'passage_retrieval_en', 'repobench-p']
+Working on max_capacity_prompts 1024 dataset passage_retrieval_en - 0/16
+Loading data...
+passage_retrieval_en
+Max Length is 11516
+Finish loading model and tokenizer
+Working on max_capacity_prompts 1024 dataset narrativeqa - 1/16
+Loading data...
+narrativeqa
+Max Length is 36418
+Finish loading model and tokenizer
+Working on max_capacity_prompts 1024 dataset qasper - 2/16
+Loading data...
+qasper
+Max Length is 14660
+Finish loading model and tokenizer
+Working on max_capacity_prompts 1024 dataset multifieldqa_en - 3/16
+Loading data...
+multifieldqa_en
+Max Length is 10337
+Finish loading model and tokenizer
+Working on max_capacity_prompts 1024 dataset hotpotqa - 4/16
+Loading data...
+hotpotqa
+Max Length is 12697
+Finish loading model and tokenizer
