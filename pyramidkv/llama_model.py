@@ -674,6 +674,8 @@ def llama_flash_attn2_forward_MiniCache(
     past_key_value: Optional[DynamicCache] = None, # Type hint to DynamicCache
     output_attentions: bool = False,
     use_cache: bool = False,
+    cache_position: Optional[torch.LongTensor] = None,
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[DynamicCache]]:
 
@@ -707,13 +709,20 @@ def llama_flash_attn2_forward_MiniCache(
     # The `value_states` as first arg to rotary_emb is unusual, typically it's for shape reference or uses hidden_states
     # Let's assume it computes cos/sin for the new q_len tokens based on their positions after kv_seq_len_past.
     current_total_seq_len = kv_seq_len_past + q_len
-    cos, sin = self.rotary_emb(value_states, seq_len=current_total_seq_len) # Ensure rotary_emb handles this
+    # cos, sin = self.rotary_emb(value_states, seq_len=current_total_seq_len) # Ensure rotary_emb handles this
+    if position_embeddings is None:
+            logger.warning_once(
+                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
+                "removed and `position_embeddings` will be mandatory."
+            )
+            cos, sin = self.rotary_emb(value_states, position_ids)
+    else:
+            cos, sin = position_embeddings
     
     # Slice cos and sin for the current q_len tokens
-    cos = cos[:, :, kv_seq_len_past:current_total_seq_len, :] 
-    sin = sin[:, :, kv_seq_len_past:current_total_seq_len, :]
-
-    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
     
     key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -773,6 +782,7 @@ def llama_flash_attn2_forward_MiniCache(
 
     # --- Attention Calculation ---
     if past_key_value is not None and not is_prefill: # Decode phase with MiniCache dual attention
+        print('decode')
         # Fetch K,V from structured cache. These methods return [B,H,S,D] or None.
         retained_k, retained_v = past_key_value.get_retained_kv(self.layer_idx)
         unit_k, unit_v = past_key_value.get_unit_kv(self.layer_idx)
@@ -792,6 +802,7 @@ def llama_flash_attn2_forward_MiniCache(
         retained_v_fa = _ensure_tensor(retained_v, query_states_unmodified_for_proximal)
         unit_k_fa = _ensure_tensor(unit_k, query_states_for_distal_fa)
         unit_v_fa = _ensure_tensor(unit_v, query_states_for_distal_fa)
+        # print(retained_k_fa.shape,unit_k_fa.shape,query_states_unmodified_for_proximal.shape)
         
         dropout_rate = self.attention_dropout if self.training else 0.0
         
@@ -799,8 +810,9 @@ def llama_flash_attn2_forward_MiniCache(
         if retained_k_fa.shape[1] > 0 : # Check if seq_len > 0 for retained KV
             attn_output_proximal, sum_exp_proximal = _flash_attention_forward(
                 self, query_states_unmodified_for_proximal, retained_k_fa, retained_v_fa, 
-                attention_mask, q_len, dropout_p=dropout_rate, causal=False, return_attn_probs=True
+                attention_mask, q_len, return_attn_probs=True
             )
+        
         
         attn_output_distal, sum_exp_distal = torch.empty_like(query_states_for_distal_fa), torch.zeros_like(query_states_for_distal_fa[:,:,:,0])
         if unit_k_fa.shape[1] > 0 : # Check if seq_len > 0 for unit KV
@@ -810,16 +822,18 @@ def llama_flash_attn2_forward_MiniCache(
             )
         
         dtype = attn_output_proximal.dtype 
-        sum_exp_distal = sum_exp_distal.to(dtype)
+        sum_exp_distal = sum_exp_distal.to(dtype).transpose(1, 2)
         sum_exp_proximal = sum_exp_proximal.to(dtype)
-
+        
         gate = 1 / (torch.exp(sum_exp_distal - sum_exp_proximal) + 1)
         gate = torch.nan_to_num(gate, 0.9) # gate is [B, H, Q(1)]
+        # print('originl',gate.shape,sum_exp_distal.shape,sum_exp_proximal.shape)
         gate = gate.transpose(1, 2).unsqueeze(-1) # -> [B, Q(1), H, 1] for broadcasting
-        
+        # print(attn_output_proximal.shape,attn_output_distal.shape,gate.shape)
         attn_output = attn_output_distal + gate * (attn_output_proximal - attn_output_distal)
         
     else: # Prefill or no past_key_value (standard attention)
+        print('prefill')
         query_states_fa = query_states.transpose(1, 2).contiguous()    # B, Q, H, D
         key_states_fa = key_states.transpose(1, 2).contiguous()      # B, Q_new, H, D
         value_states_fa = value_states.transpose(1, 2).contiguous()    # B, Q_new, H, D
@@ -827,11 +841,11 @@ def llama_flash_attn2_forward_MiniCache(
         dropout_rate = self.attention_dropout if self.training else 0.0
         # ... (Input Dtype handling as in original) ...
         attn_output = _flash_attention_forward(
-            self, query_states_fa, key_states_fa, value_states_fa, attention_mask, q_len,
-            dropout_p=dropout_rate, causal=True # Causal for prefill
+            self, query_states_fa, key_states_fa, value_states_fa, attention_mask, q_len # Causal for prefill
         )
-
+    print(attn_output.shape,bsz, q_len, self.hidden_size)
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
+    print("donw")
     attn_output = self.o_proj(attn_output)
 
     return attn_output, None, past_key_value

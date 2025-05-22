@@ -198,6 +198,15 @@ class CacheConfig:
         unused_kwargs = {key: value for key, value in kwargs.items() if key not in to_remove}
         return unused_kwargs
 
+class PretrainedConfig: # Dummy
+    def __init__(self, num_hidden_layers=32, num_attention_heads=32, hidden_size=4096):
+        self.num_hidden_layers = num_hidden_layers
+        self.num_attention_heads = num_attention_heads
+        self.hidden_size = hidden_size
+        # Add other attributes like kv_cluster if used by your init_snapkv
+        # self.kv_cluster = type('KVCluster', (), {'max_capacity_prompt': 256})()
+
+
 class DynamicCache(Cache):
     def __init__(self, config: PretrainedConfig = None, sink_size: int = 8, window_size: int = 8) -> None:
         super().__init__()
@@ -205,6 +214,7 @@ class DynamicCache(Cache):
         self.num_hidden_layers = self.config.num_hidden_layers
         self.num_heads = self.config.num_attention_heads
         self.head_dim = self.config.hidden_size // self.config.num_attention_heads
+        self._seen_tokens = 0
         
         self.sink_size = sink_size
         self.window_size = window_size
@@ -231,12 +241,6 @@ class DynamicCache(Cache):
         # Each element: Tuple[Tensor[B,H,N_unit], Tensor[B,H,N_core]]
         self.indices_analysis_results: List[Optional[Tuple[torch.Tensor, torch.Tensor]]] = [None] * self.num_hidden_layers
 
-        # Other attributes from your original class
-        self.key_magnitude: List[torch.Tensor] = [] # Role in reuse unclear, keeping for compatibility
-        self.value_magnitude: List[torch.Tensor] = []
-        self.mask_k: List[torch.Tensor] = []
-        self.mask_v: List[torch.Tensor] = []
-        self.hidden_states_list: List[torch.Tensor] = [] # Renamed from self.hidden_states to avoid confusion
 
     def _prepare_device_dtype_from_states(self, key_states):
         return key_states.device, key_states.dtype
@@ -270,6 +274,7 @@ class DynamicCache(Cache):
         
         # Calculate and store query_cache for importance scoring
         current_layer_accumulated_keys = self._original_key_cache[layer_idx]
+        query_states = query_states.transpose(1, 2)
         if query_states is not None and query_states.shape[-2] >= self.window_size:
             q_for_importance = query_states[:, :, -self.window_size:, :]
             num_accumulated_keys = current_layer_accumulated_keys.shape[-2]
@@ -277,6 +282,7 @@ class DynamicCache(Cache):
             if num_accumulated_keys > self.sink_size + self.window_size:
                 k_target_for_importance = current_layer_accumulated_keys[:, :, self.sink_size : num_accumulated_keys - self.window_size, :]
                 if k_target_for_importance.shape[-2] > 0: # Ensure middle section is not empty
+                    # print(q_for_importance.shape,k_target_for_importance.transpose(2, 3).shape)
                     attn_logits = torch.matmul(q_for_importance, k_target_for_importance.transpose(2, 3)) / math.sqrt(q_for_importance.shape[-1])
                     attn_weights = nn.functional.softmax(attn_logits, dim=-1, dtype=torch.float32).to(dtype)
                     self.query_cache[layer_idx] = attn_weights.sum(dim=-2) # Sum over query head dimension: [B, H, S_middle]
@@ -624,12 +630,8 @@ class DynamicCache(Cache):
                 cache.retained_value_cache.append(past_key_values[layer_idx][1])
                 cache.key_unit_cache.append(past_key_values[layer_idx][2])
                 cache.value_unit_cache.append(past_key_values[layer_idx][3])
-                cache.key_magnitude.append(past_key_values[layer_idx][4])
-                cache.value_magnitude.append(past_key_values[layer_idx][5])
-                cache.mask_k.append(past_key_values[layer_idx][6])
-                cache.mask_v.append(past_key_values[layer_idx][7])
-                cache.layer_map = past_key_values[layer_idx][8]
-                cache.indices.append(past_key_values[layer_idx][9])
+                cache.layer_map = past_key_values[layer_idx][4]
+                cache.indices_analysis_results.append(past_key_values[layer_idx][5])
 
 
         return cache
@@ -648,7 +650,8 @@ class DynamicCache(Cache):
         backward compatibility."""
         legacy_cache = ()
         for layer_idx in range(len(self)):
-            legacy_cache += ((self.retained_key_cache[layer_idx],  self.retained_value_cache[layer_idx], self.key_unit_cache[layer_idx], self.value_unit_cache[layer_idx], self.key_magnitude[layer_idx], self.value_magnitude[layer_idx], self.mask_k[layer_idx], self.mask_v[layer_idx],self.layer_map, self.indices[layer_idx],),)
+            # print(len(self.retained_key_cache),len(self.value_unit_cache),)
+            legacy_cache += ((self.retained_key_cache[layer_idx],  self.retained_value_cache[layer_idx], self.key_unit_cache[layer_idx], self.value_unit_cache[layer_idx], self.layer_map, self.indices_analysis_results[layer_idx],),)
         return legacy_cache
 
     def crop(self, max_length: int):
